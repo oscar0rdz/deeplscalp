@@ -1,0 +1,5 @@
+{
+  "pair": "BTC/USDT",
+  "timeframe": "1m",
+  "error": "Cannot interpret 'datetime64[ns, UTC]' as a data type"
+}

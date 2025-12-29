@@ -1,0 +1,5 @@
+{
+  "pair": "XRP/USDT",
+  "timeframe": "1h",
+  "error": "Cannot interpret 'datetime64[ns, UTC]' as a data type"
+}

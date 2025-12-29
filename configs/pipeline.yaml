@@ -1,0 +1,61 @@
+project:
+  out_dir: ./artifacts
+  workers: 4
+
+freqtrade:
+  # Carpeta donde Freqtrade guardará OHLCV descargado (json/parquet)
+  # Se usa con --datadir en download-data
+  datadir: ./data/freqtrade/binance
+  exchange: binance
+
+universe:
+  anchor_pair: BTC/USDT
+  pairs:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - DOGE/USDT
+    - XRP/USDT
+
+timeframes:
+  exec_tf: 1m
+  base_tf: 5m
+  informative_tfs: [1h, 4h]
+  timeframes_to_download: [1m, 5m, 1h, 4h]
+
+labels:
+  # Triple barrier con ATR
+  atr_period: 14
+  tp_atr_mult: 1.2
+  sl_atr_mult: 1.0
+
+  # Horizonte en velas de 5m (escala dinámica por volatilidad)
+  base_horizon: 6
+  horizon_min: 3
+  horizon_max: 12
+  dynamic_horizon:
+    enabled: true
+
+features:
+  rsi_period: 14
+  adx_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+
+  bb_period: 20
+  bb_std: 2.0
+  donchian_period: 20
+
+  vol_lookback: 48
+  chop_period: 14
+
+  # Twin Range Filter (proxy)
+  twin_range_fast: 7
+  twin_range_slow: 28
+
+costs:
+  # Para tu política (más adelante): estos costos se integran en la decisión.
+  fee: 0.001
+  slippage_bps: 5
+  spread_bps: 2
