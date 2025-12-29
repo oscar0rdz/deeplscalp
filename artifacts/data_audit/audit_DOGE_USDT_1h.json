@@ -1,5 +1,13 @@
 {
+  "rows": 43740,
+  "start": "2021-01-01 00:00:00+00:00",
+  "end": "2025-12-29 01:00:00+00:00",
+  "duplicates": 0,
+  "missing_candles": 14,
+  "missing_pct": 0.0003199707455318371,
+  "median_step_seconds": 3600.0,
+  "max_gap_seconds": 18000.0,
   "pair": "DOGE/USDT",
   "timeframe": "1h",
-  "error": "Cannot interpret 'datetime64[ns, UTC]' as a data type"
+  "file": "data/freqtrade/binance/DOGE_USDT-1h.feather"
 }
