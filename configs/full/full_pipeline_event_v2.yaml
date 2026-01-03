@@ -1,0 +1,123 @@
+run:
+  name: "full_pipeline_event_v2"
+  output_dir: "reports/full_run_v2"
+  artifacts_dir: "artifacts"
+  seed: 42
+
+runtime:
+  device: "auto"     # auto|cpu|mps|cuda
+  torch_threads: 8
+
+data:
+  bar_minutes: 5
+  ohlcv_parquet: "artifacts/datasets/ohlcv_ETH_USDT_5m.parquet"
+  datetime_col: "datetime"
+  tz: "UTC"
+  timeframe_minutes: 5
+
+  split:
+    n_folds: 3
+    train_min_days: 180
+    val_days: 50
+    test_days: 50
+
+venue:
+  mode: perp
+  use_maker: false
+  fee_maker: 0.0002
+  fee_taker: 0.0006
+  slip_bps: 1.0
+  funding_bps_8h: 0.5
+
+events:
+  enabled: false
+  method: "none"
+  keep_background_ratio: 1.0
+
+features:
+  seq_len: 256
+  atr_window: 14
+  use_mtf: true
+  vol_z_win: 96
+  drop_constant_std: 1e-10
+  # si ya tienes parquet de aggTrades:
+  # aggtrades_parquet: "artifacts/datasets/aggtrades_SYMBOL_5m.parquet"
+
+labels:
+  atr_period: 14
+  vol_window: 96
+  vol_scaled: true
+
+  base_horizon: 14        # 12–16 recomendado
+  tp_atr_mult: 1.4        # 1.2–1.6
+  sl_atr_mult: 1.1        # 1.0–1.3
+  conservative_same_bar: true
+
+  # evita operar por centavos:
+  # side_min_edge: 0.0020
+
+  w_flat: 0.7
+  w_side: 2.2
+  w_tp: 2.5
+  w_sl: 2.5
+  w_time: 1.0
+
+model:
+  quantiles: [0.1, 0.5, 0.9]
+  patch_len: 16
+  d_model: 128  # reduced from 192
+  n_heads: 4    # reduced from 6
+  n_layers_time: 2
+  n_layers_feat: 2  # reduced from 4
+  dropout: 0.12
+
+train:
+  epochs: 6               # quick realista (no 1–2 si quieres señal)
+  lr: 0.0006
+  batch_size: 64   # reduced from 256
+  grad_clip: 1.0
+  wd: 0.0001
+
+  reg_alpha: 1.0
+  cls_alpha_side: 1.0
+  cls_alpha_hit: 0.8
+
+  side_class_weights: [1.0, 2.5, 2.5]
+  hit_class_weights:  [2.0, 1.0, 2.0]
+
+risk:
+  leverage: 3.0           # 3x base, 5x solo si PF estable
+  base_horizon: 14
+  tp_atr_mult: 1.4
+  sl_atr_mult: 1.1
+  exit_ev_min: 0.0
+  exit_psl_max: 0.55
+  max_hold_bars: 16
+
+thresholds:
+  top_k: 12
+  score_pct: 0.01  # very relaxed for testing
+  ood_pct: 0.90
+  p_side_min: 0.10  # very relaxed for testing
+  p_tp_min: 0.05   # very relaxed for testing
+  p_sl_max: 0.80   # very relaxed for testing
+  ev_min: 0.00005  # very relaxed for testing
+  cooldown_bars: 1
+
+optuna:
+  n_trials: 25             # en quick se sobreescribe a 25
+  min_trades_val: 5        # en quick se sobreescribe a 5
+
+eval:
+  fail_fast:
+    enabled: true
+    min_trades_val: 30
+    min_pf_val: 1.05
+    max_mdd_val: 0.12
+
+quick:
+  train_bars: 20000
+  val_bars: 4000
+  test_bars: 4000
+  optuna_trials: 25
+  min_trades_val: 5

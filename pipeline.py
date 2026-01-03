@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Dict, List
 
@@ -24,8 +25,8 @@ TF_TO_PANDAS = {
     "5m": "5min",
     "15m": "15min",
     "30m": "30min",
-    "1h": "1H",
-    "4h": "4H",
+    "1h": "1h",
+    "4h": "4h",
     "1d": "1D",
 }
 
@@ -300,7 +301,9 @@ def compute_features(df: pd.DataFrame, cfg: Dict) -> pd.DataFrame:
     tr_sum = tr.rolling(chop_n, min_periods=chop_n).sum()
     hi = high.rolling(chop_n, min_periods=chop_n).max()
     lo = low.rolling(chop_n, min_periods=chop_n).min()
-    df["chop"] = 100 * np.log10(tr_sum / (hi - lo + 1e-12)) / np.log10(chop_n)
+    den = (hi - lo).clip(lower=1e-12)
+    ratio = (tr_sum / den).clip(lower=1e-12)
+    df["chop"] = 100 * np.log10(ratio) / np.log10(chop_n)
 
     trf_fast = int(cfg["features"].get("twin_range_fast", 7))
     trf_slow = int(cfg["features"].get("twin_range_slow", 28))
@@ -337,79 +340,61 @@ def compute_features(df: pd.DataFrame, cfg: Dict) -> pd.DataFrame:
     return df
 
 
-def dynamic_horizon(df: pd.DataFrame, cfg: Dict) -> np.ndarray:
-    hmin = int(cfg["labels"]["horizon_min"])
-    hmax = int(cfg["labels"]["horizon_max"])
-    base_h = int(cfg["labels"].get("base_horizon", 6))
-    atr = df["atr_ratio"].to_numpy()
-    med = pd.Series(atr).rolling(288, min_periods=288).median().to_numpy()
-    H = np.full(len(df), base_h, dtype=int)
-    for i in range(len(df)):
-        if np.isnan(atr[i]) or np.isnan(med[i]) or med[i] == 0:
-            continue
-        scale = med[i] / atr[i]
-        H[i] = int(round(base_h * scale))
-    return np.clip(H, hmin, hmax)
+def export_training_dataset_v7(df: pd.DataFrame, pair: str, outpath: Path, cfg: Dict) -> None:
+    """
+    Dataset para tu trainer V7:
+      - index = ds
+      - incluye features + labels:
+          y_side, yc_long, yc_short, yL_reg, yS_reg, vol_scale, sample_weight
+    """
+    out = df.copy().sort_values("ds").reset_index(drop=True)
+    out = out.set_index("ds")
 
+    # columnas mínimas obligatorias para sim/predict
+    keep = ["open", "high", "low", "close", "volume"]
+    for c in keep:
+        if c not in out.columns:
+            raise ValueError(f"Falta columna {c} en dataset.")
 
-def label_triple_barrier(df: pd.DataFrame, cfg: Dict) -> pd.DataFrame:
-    df = df.copy().reset_index(drop=True)
-    close = df["close"].to_numpy()
-    high = df["high"].to_numpy()
-    low = df["low"].to_numpy()
-    atr = df["atr"].to_numpy()
+    # limpieza numérica fuerte
+    out = out.replace([np.inf, -np.inf], np.nan)
 
-    tp_k = float(cfg["labels"]["tp_atr_mult"])
-    sl_k = float(cfg["labels"]["sl_atr_mult"])
+    # drop donde labels no existen (finales por horizon, atr NaN, etc.)
+    req = ["y_side", "yc_long", "yc_short", "yL_reg", "yS_reg", "vol_scale", "sample_weight"]
+    out = out.dropna(subset=req)
 
-    use_dyn = cfg["labels"].get("dynamic_horizon", {}).get("enabled", True)
-    H = dynamic_horizon(df, cfg) if use_dyn else np.full(len(df), int(cfg["labels"].get("base_horizon", 6)), dtype=int)
+    # float32 para velocidad
+    for c in out.columns:
+        if pd.api.types.is_float_dtype(out[c]):
+            out[c] = out[c].astype("float32")
+        elif pd.api.types.is_integer_dtype(out[c]):
+            out[c] = out[c].astype("int32")
 
-    labels = np.zeros(len(df), dtype=int)
-    hit = np.array(["time"] * len(df), dtype=object)
-
-    for i in range(len(df)):
-        if np.isnan(atr[i]) or i + H[i] >= len(df):
-            continue
-        tp = close[i] + tp_k * atr[i]
-        sl = close[i] - sl_k * atr[i]
-        end = i + H[i]
-        for j in range(i + 1, end + 1):
-            if high[j] >= tp:
-                labels[i] = 1
-                hit[i] = "tp"
-                break
-            if low[j] <= sl:
-                labels[i] = -1
-                hit[i] = "sl"
-                break
-
-    df["tbm_label"] = labels
-    df["tbm_hit"] = hit
-    df["tbm_horizon"] = H
-    return df
-
-
-def export_neuralforecast_dataset(df: pd.DataFrame, pair: str, outpath: Path) -> None:
-    df = df.copy().sort_values("ds").reset_index(drop=True)
-    df["y"] = df["ret_1"]
-    df["unique_id"] = pair
-
-    feature_cols = [
-        "atr_ratio", "adx", "rsi", "macd_hist", "macd_hist_slope",
-        "bb_width", "bb_z", "don_pos",
-        "upper_wick_ratio", "lower_wick_ratio", "close_in_range",
-        "vol_z", "vol_rel", "vwap_dev", "chop",
-        "trf_dir", "feat_breakout_pressure", "feat_rebound_pressure",
-        "btc_ret5m", "btc_vol_regime",
-        "rv_5m", "up_vol_ratio_5m", "range_5m", "rv_norm",
-    ]
-    feature_cols = [c for c in feature_cols if c in df.columns]
-
-    out = df[["unique_id", "ds", "y"] + feature_cols + ["tbm_label", "tbm_hit", "tbm_horizon"]].copy()
-    out = out.dropna(subset=["y"] + feature_cols)
     _ensure_dir(outpath.parent)
-    out.to_parquet(outpath, index=False)
+    out.to_parquet(outpath, index=True, compression="zstd")
+
+
+def export_training_dataset_v71(df: pd.DataFrame, pair: str, outpath: Path) -> None:
+    df = df.copy().sort_values("ds").reset_index(drop=True)
+
+    # Columns imprescindibles: ds + ohlcv + atr + labels + features
+    # (se asume compute_features ya creó muchos features)
+    must = ["ds","open","high","low","close","volume","atr","atr_ratio"]
+    for c in must:
+        if c not in df.columns:
+            raise ValueError(f"Falta columna requerida para V7.1: {c}")
+
+    # Reduce precision para tamaño
+    for c in df.columns:
+        if c == "ds":
+            continue
+        if pd.api.types.is_float_dtype(df[c]):
+            df[c] = df[c].astype("float32")
+        elif pd.api.types.is_integer_dtype(df[c]):
+            df[c] = df[c].astype("int32")
+
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(outpath, index=False, compression="zstd")
 
 
 def process_pair(pair: str, cfg: Dict, raw_dir: Path, out_dir: Path, anchor_pair: str) -> Path:
@@ -423,17 +408,49 @@ def process_pair(pair: str, cfg: Dict, raw_dir: Path, out_dir: Path, anchor_pair
     btc1c = clean_ohlcv(btc1, cfg["timeframes"]["exec_tf"])
 
     aligned = align_timeframes(df1c, btc1c, cfg["timeframes"]["informative_tfs"])
-    feats = compute_features(aligned, cfg)
-    labeled = label_triple_barrier(feats, cfg)
 
-    outpath = out_dir / "datasets" / f"nf_{_norm_pair(pair)}_5m.parquet"
-    export_neuralforecast_dataset(labeled, pair, outpath)
+    quick = cfg.get("quick", {})
+    if bool(quick.get("enabled", False)):
+        days = int(quick.get("days", 45))
+        aligned = aligned[aligned["ds"] >= (aligned["ds"].max() - pd.Timedelta(days=days))]
+
+    feats = compute_features(aligned, cfg)
+
+    # Labels V7
+    from deeplscalp.data.labels_side_v7 import build_labels_side_v7
+    labeled = build_labels_side_v7(feats, cfg)
+
+    outpath = out_dir / "datasets" / f"train_{_norm_pair(pair)}_5m_v7.parquet"
+    export_training_dataset_v7(labeled, pair, outpath, cfg)
+    return outpath
+
+
+def process_pair_v71(pair: str, cfg: Dict, raw_dir: Path, out_dir: Path, anchor_pair: str) -> Path:
+    p1 = find_ohlcv_file(raw_dir, pair, cfg["timeframes"]["exec_tf"])
+    a1 = find_ohlcv_file(raw_dir, anchor_pair, cfg["timeframes"]["exec_tf"])
+
+    df1 = read_ohlcv(p1, pair, cfg["timeframes"]["exec_tf"])
+    btc1 = read_ohlcv(a1, anchor_pair, cfg["timeframes"]["exec_tf"])
+
+    df1c = clean_ohlcv(df1, cfg["timeframes"]["exec_tf"])
+    btc1c = clean_ohlcv(btc1, cfg["timeframes"]["exec_tf"])
+
+    aligned = align_timeframes(df1c, btc1c, cfg["timeframes"]["informative_tfs"])
+
+    feats = compute_features(aligned, cfg)
+
+    # Etiquetas V7.1
+    from deeplscalp.data.labels_side_v71 import build_labels_side_v71
+    labeled = build_labels_side_v71(feats, cfg)
+
+    outpath = out_dir / "datasets" / f"train_{_norm_pair(pair)}_5m_v71.parquet"
+    export_training_dataset_v71(labeled, pair, outpath)
     return outpath
 
 
 def cmd_audit(cfg: Dict) -> None:
     raw_dir = Path(cfg["freqtrade"]["datadir"]).expanduser()
-    out_dir = Path(cfg["project"]["out_dir"]).expanduser()
+    out_dir = Path(cfg.get("project", {}).get("out_dir", "artifacts")).expanduser()
     _ensure_dir(out_dir / "data_audit")
 
     for pair in cfg["universe"]["pairs"]:
@@ -450,19 +467,35 @@ def cmd_audit(cfg: Dict) -> None:
                 json.dump(rep, f, indent=2)
 
 
+def cmd_clean(cfg: Dict) -> None:
+    out_dir = Path(cfg.get("project", {}).get("out_dir", "artifacts")).expanduser()
+    datasets_dir = out_dir / "datasets"
+    if datasets_dir.exists():
+        shutil.rmtree(datasets_dir)
+        print(f"Cleaned {datasets_dir}")
+    else:
+        print("No datasets directory to clean")
+
+
 def cmd_build(cfg: Dict) -> None:
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     raw_dir = Path(cfg["freqtrade"]["datadir"]).expanduser()
-    out_dir = Path(cfg["project"]["out_dir"]).expanduser()
+    out_dir = Path(cfg.get("project", {}).get("out_dir", "artifacts")).expanduser()
     _ensure_dir(out_dir / "datasets")
+
+    # Check disk space
+    free_bytes = shutil.disk_usage(out_dir).free
+    min_free = 5 * 1024**3  # 5 GB
+    if free_bytes < min_free:
+        raise RuntimeError(f"Insufficient disk space: {free_bytes / 1024**3:.1f} GB free, need at least {min_free / 1024**3:.1f} GB")
 
     anchor = cfg["universe"]["anchor_pair"]
     pairs = [p for p in cfg["universe"]["pairs"] if p != anchor]
     workers = int(cfg["project"].get("workers", max(1, os.cpu_count() // 2)))
 
     with ProcessPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(process_pair, pair, cfg, raw_dir, out_dir, anchor) for pair in pairs]
+        futs = [ex.submit(process_pair_v71, pair, cfg, raw_dir, out_dir, anchor) for pair in pairs]
         for f in as_completed(futs):
             print(f"[OK] wrote {f.result()}")
 
@@ -473,13 +506,16 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("audit")
     sub.add_parser("build")
+    sub.add_parser("clean")
     args = ap.parse_args()
 
     cfg = load_cfg(args.config)
     if args.cmd == "audit":
         cmd_audit(cfg)
-    else:
+    elif args.cmd == "build":
         cmd_build(cfg)
+    elif args.cmd == "clean":
+        cmd_clean(cfg)
 
 
 if __name__ == "__main__":

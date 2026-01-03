@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# OS / Editors
+.DS_Store
+.vscode/
+.idea/
+
+# Artifacts / Data (NO subir)
+artifacts/
+data/
+datasets/
+*.parquet
+*.csv
+*.h5
+*.ckpt
+*.pt
+*.pth
+
+# Secrets
+.env
+*.key
+*.pem
+
+# Logs
+*.log

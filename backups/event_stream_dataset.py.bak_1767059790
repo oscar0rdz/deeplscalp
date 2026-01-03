@@ -1,0 +1,218 @@
+# DeepLScalp/evaluation/event_stream_dataset.py
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+
+def _safe_div(num: np.ndarray, den: np.ndarray) -> np.ndarray:
+    """
+    División robusta sin warnings por división entre cero.
+    """
+    out = np.zeros_like(num, dtype=np.float64)
+    m = np.isfinite(den) & (den > 0)
+    out[m] = num[m] / den[m]
+    return out
+
+
+def _safe_z(x: np.ndarray, win_mean: np.ndarray, win_std: np.ndarray) -> np.ndarray:
+    """
+    Z-score robusto sin warnings por división entre cero.
+    """
+    z = np.zeros_like(x, dtype=np.float64)
+    m = np.isfinite(win_std) & (win_std > 0)
+    z[m] = (x[m] - win_mean[m]) / win_std[m]
+    return z
+
+
+def compute_event_masks(df: pd.DataFrame, params: dict | None) -> dict[str, np.ndarray]:
+    """
+    Construye máscaras de "eventos" usando SOLO información presente/pasada (sin labels, sin futuro).
+
+    Requiere columnas: open, high, low, close, volume.
+
+    Objetivo:
+      - No "etiquetar TP/SL", sino detectar contextos con mayor probabilidad de movimiento:
+        breakout / volburst / sweep / meanrev.
+      - Esto se usa para muestrear más eventos durante el entrenamiento y mejorar eficiencia.
+    """
+    p = params or {}
+
+    # Ventanas típicas sobre 5m
+    n_break = int(p.get("breakout_lookback", 48))  # 48 velas de 5m ~ 4h
+    n_ema = int(p.get("ema_span", 96))             # 96 velas ~ 8h
+    n_vol = int(p.get("vol_lookback", 96))         # 96 velas ~ 8h
+
+    # Umbrales
+    k_vol = float(p.get("vol_z", 2.0))
+    k_ret = float(p.get("ret_z", 2.5))
+    dev_k = float(p.get("dev_z", 2.0))
+    wick_th = float(p.get("wick_ratio", 0.60))
+
+    close = df["close"].to_numpy(np.float64)
+    high = df["high"].to_numpy(np.float64)
+    low = df["low"].to_numpy(np.float64)
+    open_ = df["open"].to_numpy(np.float64) if "open" in df.columns else close
+    vol = df["volume"].to_numpy(np.float64)
+
+    # Retorno 1-bar (log)
+    ret1 = np.zeros_like(close)
+    ret1[1:] = np.log(np.maximum(close[1:], 1e-12)) - np.log(np.maximum(close[:-1], 1e-12))
+
+    # z-score de retorno (usa std rolling)
+    r = pd.Series(ret1)
+    ret_std = r.rolling(n_vol, min_periods=n_vol).std().to_numpy(np.float64)
+    ret_z = _safe_div(ret1, ret_std)
+
+    # z-score de volumen
+    v = pd.Series(vol)
+    v_mean = v.rolling(n_vol, min_periods=n_vol).mean().to_numpy(np.float64)
+    v_std = v.rolling(n_vol, min_periods=n_vol).std().to_numpy(np.float64)
+    vol_z = _safe_z(vol, v_mean, v_std)
+
+    # EMA y desviación (mean reversion proxy)
+    ema = pd.Series(close).ewm(span=n_ema, adjust=False, min_periods=n_ema).mean().to_numpy(np.float64)
+    dev = close - ema
+    dev_std = pd.Series(dev).rolling(n_vol, min_periods=n_vol).std().to_numpy(np.float64)
+    dev_z = _safe_div(dev, dev_std)
+
+    # Breakout: rompe HH/LL previos (shift(1) para no usar el "presente" como referencia)
+    hh = pd.Series(high).rolling(n_break, min_periods=n_break).max().shift(1).to_numpy(np.float64)
+    ll = pd.Series(low).rolling(n_break, min_periods=n_break).min().shift(1).to_numpy(np.float64)
+
+    ok_hh = np.isfinite(hh)
+    ok_ll = np.isfinite(ll)
+
+    breakout_up = ok_hh & (close > hh) & (vol_z > k_vol)
+    breakout_dn = ok_ll & (close < ll) & (vol_z > k_vol)
+
+    # Momentum shock / vol burst
+    volburst = (np.abs(ret_z) > k_ret) & (vol_z > (0.5 * k_vol))
+
+    # Liquidity sweep proxy: wick grande relativo al rango + volumen no bajo
+    rng = np.maximum(high - low, 1e-12)
+    wick_up = (high - np.maximum(open_, close)) / rng
+    wick_dn = (np.minimum(open_, close) - low) / rng
+    sweep = (np.maximum(wick_up, wick_dn) > wick_th) & (vol_z > 0.0)
+
+    # Mean reversion extreme
+    meanrev = (np.abs(dev_z) > dev_k)
+
+    return {
+        "breakout": (breakout_up | breakout_dn),
+        "volburst": volburst,
+        "sweep": sweep,
+        "meanrev": meanrev,
+    }
+
+
+class EventStreamWindowDataset:
+    """
+    Dataset event-driven por muestreo de ventanas.
+
+    En cada __getitem__:
+      - con prob p_event: toma un índice dentro de "eventos"
+      - con prob 1-p_event: toma un índice dentro de "no-eventos"
+        (para que el modelo aprenda a NO operar en contextos pobres).
+
+    IMPORTANTÍSIMO:
+      - yc siempre debe ser 0..2, para np.bincount() y class weights:
+          sl   -> 0
+          time -> 1
+          tp   -> 2
+
+    Devuelve:
+      Xw: (lookback, F) float32
+      y : float (regresión)
+      yc: int (0..2)
+      w : float (sample_weight o 1.0)
+    """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        feature_cols: list[str],
+        lookback: int,
+        steps_per_epoch: int,
+        p_event: float,
+        event_params: dict | None,
+        seed: int = 12345,
+        weight_col: str | None = None,
+    ):
+        self.df = df.reset_index(drop=True)
+        self.feature_cols = feature_cols
+        self.lookback = int(lookback)
+        self.steps_per_epoch = int(steps_per_epoch)
+        self.p_event = float(p_event)
+        self.rng = np.random.default_rng(int(seed))
+
+        # Features
+        self.X = self.df[self.feature_cols].to_numpy(np.float32, copy=True)
+
+        # y (regresión)
+        if "y" not in self.df.columns:
+            raise ValueError("Falta columna 'y' en df (target principal).")
+        self.y = self.df["y"].to_numpy(np.float32, copy=True)
+
+        # yc (clase) - se fuerza a 0..2
+        yc_raw: np.ndarray
+        if "yc" in self.df.columns:
+            yc_raw = self.df["yc"].to_numpy(copy=True)
+        elif "tbm_hit" in self.df.columns:
+            # si el dataset trae tbm_hit con sl/time/tp, lo mapeamos
+            m = {"sl": -1, "time": 0, "tp": 1}
+            yc_raw = self.df["tbm_hit"].map(m).fillna(0).astype("int16").to_numpy()
+        else:
+            yc_raw = np.zeros(len(self.df), dtype=np.int16)
+
+        yc_raw = np.asarray(yc_raw, dtype=np.int16)
+
+        # Normaliza a clases 0..2:
+        # - si ya viene 0..2, lo dejamos
+        # - si viene -1/0/1, lo convertimos a 0..2
+        if yc_raw.min() >= 0 and yc_raw.max() <= 2:
+            self.yc = yc_raw.astype(np.int64)
+        else:
+            # -1 -> 0, 0 -> 1, 1 -> 2
+            self.yc = (yc_raw + 1).clip(0, 2).astype(np.int64)
+
+        # sample_weight opcional
+        self.w = None
+        if weight_col and (weight_col in self.df.columns):
+            self.w = self.df[weight_col].to_numpy(np.float32, copy=True)
+
+        # Construye máscaras de eventos y define índices de muestreo
+        masks = compute_event_masks(self.df, event_params)
+
+        event_any = np.zeros(len(self.df), dtype=bool)
+        for mm in masks.values():
+            event_any |= np.asarray(mm, dtype=bool)
+
+        # Índices válidos (para que haya lookback completo)
+        valid = np.arange(len(self.df))
+        valid = valid[valid >= (self.lookback - 1)]
+
+        ev_idx = valid[event_any[valid]]
+        ne_idx = valid[~event_any[valid]]
+
+        # fallback seguro: si hay pocos eventos/no-eventos, usa valid completo
+        self.ev_idx = ev_idx if len(ev_idx) > 2000 else valid
+        self.ne_idx = ne_idx if len(ne_idx) > 2000 else valid
+
+    def __len__(self) -> int:
+        return self.steps_per_epoch
+
+    def __getitem__(self, i: int):
+        # Samplea un índice j
+        if self.rng.random() < self.p_event:
+            j = int(self.ev_idx[self.rng.integers(0, len(self.ev_idx))])
+        else:
+            j = int(self.ne_idx[self.rng.integers(0, len(self.ne_idx))])
+
+        s = j - self.lookback + 1
+        Xw = self.X[s : j + 1]     # (lookback, F)
+        y = float(self.y[j])
+        yc = int(self.yc[j])       # 0..2 (garantizado)
+        w = float(self.w[j]) if self.w is not None else 1.0
+
+        return Xw, y, yc, w

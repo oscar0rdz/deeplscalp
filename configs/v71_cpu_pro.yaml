@@ -1,0 +1,100 @@
+project:
+  out_dir: "artifacts"
+  workers: 2
+
+runtime:
+  torch_num_threads: 6
+
+freqtrade:
+  datadir: "data/freqtrade"
+
+universe:
+  anchor_pair: "BTC/USDT"
+  pairs: ["BTC/USDT", "XRP/USDT"]
+
+timeframes:
+  exec_tf: "1m"
+  informative_tfs: ["4h"]
+
+features:
+  seq_len: 192
+  # si no defines "columns", el script las infiere del parquet
+
+labels:
+  atr_period: 14
+  base_horizon: 12
+  tp_atr_mult: 1.4
+  sl_atr_mult: 1.1
+  vol_window: 96
+  vol_floor: 1e-6
+  vol_scaled: true
+  conservative_same_bar: true
+
+risk:
+  max_hold_bars: 16
+
+split:
+  train_bars: 220000
+  val_bars: 60000
+  test_bars: 90000
+  # embargo mínimo recomendado (si lo omites, el script calcula uno)
+  embargo_bars: 20
+
+train:
+  batch_size: 256
+  lr: 0.0003
+  wd: 0.0005
+  epochs: 12
+  early_stop_patience: 3
+  grad_clip: 1.0
+
+model:
+  d_model: 128
+  nhead: 4
+  num_layers: 2
+  dropout: 0.12
+  quantiles: [0.10, 0.50, 0.90]
+  norm_first: true
+
+backtest:
+  # Realismo: sizing + latencia
+  leverage: 3.0
+  risk_fraction: 0.25
+  latency_bars: 1
+
+  # Fricción: ajústalo a tu exchange (fees + spread/impacto)
+  slippage: 0.00025
+  cost_mult: 1.0
+
+  conservative_same_bar: true
+  max_hold_bars: 16
+  cooldown_bars: 1
+
+  # Gates robustos
+  thr_lookback_bars: 5000
+  score_q: 0.70
+  ev_q: 0.75
+  ood_q: 0.90
+
+  p_side_min: 0.48
+  p_tp_min: 0.22
+  p_sl_max: 0.55
+  side_margin_min: 0.015
+  ev_abs_min: 0.0
+
+  # TopK reduce sobretrading
+  use_topk: true
+  top_k: 10
+
+  # Regime/Event coherencia
+  use_regime_event_filter: true
+  spike_block: true
+  spike_p_min: 0.65
+  range_p_max_for_breakout: 0.60
+  trend_p_min_for_breakout: 0.45
+
+  # Reevaluación (si quieres más conservador, sube exit_ev_min)
+  exit_ev_min: -0.0002
+  exit_psl_max: 0.65
+
+  subperiod_slices: 6

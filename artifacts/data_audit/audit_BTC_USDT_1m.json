@@ -9,5 +9,5 @@
   "max_gap_seconds": 17100.0,
   "pair": "BTC/USDT",
   "timeframe": "1m",
-  "file": "data/freqtrade/binance/BTC_USDT-1m.feather"
+  "file": "data/freqtrade/BTC_USDT-1m.parquet"
 }

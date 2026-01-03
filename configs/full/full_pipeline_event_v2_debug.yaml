@@ -1,0 +1,188 @@
+run:
+  name: "full_pipeline_event_v2_debug"
+  output_dir: "reports/full_run_v2_debug"
+  artifacts_dir: "artifacts"
+  seed: 42
+
+runtime:
+  device: "auto"     # auto|cpu|mps|cuda
+  torch_threads: 8
+
+debug:
+  gate_audit: true
+
+data:
+  ohlcv_parquet: "artifacts/datasets/ohlcv_ETH_USDT_5m.parquet"
+  datetime_col: "datetime"
+  tz: "UTC"
+  timeframe_minutes: 5
+
+  split:
+    n_folds: 3
+    train_min_days: 180
+    val_days: 50
+    test_days: 50
+
+labels:
+  # V5 TBM execution-aligned
+  horizon_bars: 6
+  base_horizon: 6
+  horizon_min: 3
+  horizon_max: 12
+  dynamic_horizon:
+    enabled: true
+  tp_atr_mult: 1.2
+  sl_atr_mult: 1.0
+  conservative_same_bar: true
+  vol_window: 96
+  vol_floor: 1e-6
+  vol_scaled: true
+  w_time: 1.0
+  w_tp: 2.5
+  w_sl: 2.5
+  atr_period: 14
+
+execution:
+  score_iqr_lambda: 0.5
+
+costs:
+  fee_rt: 0.0004
+  spread_rt: 0.0002
+  slippage_rt: 0.0003
+  min_edge_rt: 0.0010
+
+events:
+  enabled: true
+  method: "none"   # vol_and_edge | edge_only | vol_only | none
+  vol_lookback: 48         # 48 velas ~ 4 horas
+  vol_quantile: 0.70       # "eventos" cuando vol > q70
+  keep_background_ratio: 0.40  # conserva 40% de barras no-evento para no sesgar
+  pre_event_context: 0     # opcional: incluir barras previas; 0 = no
+  post_event_context: 0    # opcional
+
+  # costo roundtrip (fees + spread/slippage aproximado)
+  cost_rt: 0.0013
+
+  # buffer adicional para no tradear señales marginales (evita que el costo te coma)
+  # NOTA: no lo uso como piso duro de q50 (solo como apoyo a event selection si lo integras).
+  edge_buffer: 0.0007   # 0.07%
+
+  # Sugerencia: subir retención para entrenar con más variedad
+  # keep_train_rows: 0.40
+
+  # Configuración para select_events
+  absret_q: 0.95
+  vol_q: 0.90
+  volz_thr: 1.5
+  min_gap_bars: 12
+
+features:
+  drop_constant_std: 1.0e-10
+  seq_len: 148             # 128 velas = 10.67 horas de contexto
+  # ventanas típicas para scalping
+  rsi_windows: [7, 14]
+  ema_windows: [9, 21, 55]
+  vol_windows: [12, 48]
+  atr_window: 14
+
+model:
+  d_model: 64
+  nhead: 4
+  num_layers: 4
+  dropout: 0.10
+  quantiles: [0.1, 0.5, 0.9]
+  norm_first: false        # quita warning + mejora fast-path
+
+train:
+  epochs: 30
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  early_stop_patience: 6
+  event_weight: 4.0
+  cls_alpha: 0.60
+  event_weight: 4.0
+  pos_weight_clip: 8.0
+  sample_weighting:
+    enabled: true
+    event_weight: 3.0
+    background_weight: 1.0
+  event_boost: 3.0
+  mag_boost: 1.0
+  mag_clip: 5.0
+
+risk:
+  tp_min_rt: 0.0015
+  sl_min_rt: 0.0018
+  max_hold_bars: 10
+  tp1_frac: 0.70
+  trail_rt: 0.0020
+  be_after: true
+  be_lock: 0.0002
+  move_be: false
+  be_offset_rt: 0.0002
+
+optuna:
+  n_trials: 25             # en quick se sobreescribe a 25
+  min_trades_val: 5        # en quick se sobreescribe a 5
+  # Debug: sin filtros
+  score_pct: 0.0
+  ood_pct: 1.0
+  p_tp_min: 0.0
+  p_sl_max: 1.0
+  ev_min: -1.0
+  top_k: 0
+
+eval:
+  fail_fast:
+    enabled: true
+    min_trades_val: 30
+    min_pf_val: 1.05
+    max_mdd_val: 0.12
+
+quick:
+  train_bars: 20000
+  val_bars: 4000
+  test_bars: 4000
+  optuna_trials: 25
+  min_trades_val: 5
+
+backtest:
+  cost_rt: 0.0013
+  costs:
+    fee_per_side: 0.0004
+    slippage_per_side: 0.00025
+  edge_buffer_rt: 0.0002
+
+  risk:
+    use_dynamic_tp_sl: true
+    tp_k: 1.6
+    sl_k: 1.1
+    max_hold_bars: 10
+    breakeven_after_tp: true
+    breakeven_lock: 0.0002
+    tp_min_rt: 0.0015
+    tp_max_rt: 0.0100
+    sl_min_rt: 0.0015
+    sl_max_rt: 0.0100
+
+  constraints:
+    min_trades: 30
+    max_drawdown: 0.25
+    min_net_ret: 0.995   # en VAL al inicio; en producción lo subes a 1.01+
+
+  scoring:
+    pf_clamp_for_score: 5.0
+    no_trade_penalty: 10000
+    net_loss_penalty: 25000
+    net_gain_reward: 25000
+    pf_weight: 200
+    wr_weight: 80
+    mdd_weight: 1200
+    trade_shortfall_penalty: 60
+    mdd_breach_penalty: 20000
+    tpd_min: 2.0
+    tpd_target: 8.0
+    tpd_bonus: 60
+    tpd_penalty: 400

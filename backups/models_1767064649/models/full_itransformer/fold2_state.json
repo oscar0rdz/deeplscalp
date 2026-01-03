@@ -1,0 +1,8 @@
+{
+  "fold_id": 2,
+  "epoch": 13,
+  "best_val": 0.760942897488994,
+  "bad_epochs": 4,
+  "ckpt_path": "models/full_itransformer/fold2_last.pt",
+  "version": 2
+}

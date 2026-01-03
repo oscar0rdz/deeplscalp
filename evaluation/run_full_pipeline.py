@@ -1,0 +1,915 @@
+
+
+
+# ---------------- JSON-safe helpers ----------------
+def _to_jsonable(x):
+    """Convierte objetos comunes (numpy/torch/pathlib) a algo serializable por json."""
+    try:
+        import torch
+        if isinstance(x, torch.Tensor):
+            # tensor escalar -> float, tensor vector -> lista
+            return x.detach().cpu().item() if x.ndim == 0 else x.detach().cpu().tolist()
+    except Exception:
+        pass
+
+    try:
+        import numpy as np
+        if isinstance(x, (np.integer, np.floating, np.bool_)):
+            return x.item()
+        if isinstance(x, np.ndarray):
+            return x.tolist()
+    except Exception:
+        pass
+
+    from pathlib import Path as _Path
+    if isinstance(x, _Path):
+        return str(x)
+
+    if isinstance(x, dict):
+        return {str(k): _to_jsonable(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_to_jsonable(v) for v in x]
+    return x
+# ---------------------------------------------------
+
+
+import os, glob, json, time
+from json import JSONDecodeError
+from pathlib import Path
+import numpy as np
+
+
+# ---------------------------------------------------------------------
+# Collate robusto: convierte datetimes a int64(ns) para que PyTorch no falle.
+def _to_collatable(x):
+    import numpy as _np
+    import datetime as _dt
+    try:
+        import pandas as _pd
+    except Exception:
+        _pd = None
+
+    # numpy datetime64
+    if isinstance(x, _np.datetime64):
+        return x.astype("datetime64[ns]").astype("int64")
+
+    # pandas Timestamp
+    if _pd is not None and isinstance(x, _pd.Timestamp):
+        if x.tzinfo is not None:
+            x = x.tz_convert("UTC").tz_localize(None)
+        return x.to_datetime64().astype("datetime64[ns]").astype("int64")
+
+    # python datetime
+    if isinstance(x, _dt.datetime):
+        # Si trae tz, lo pasamos a UTC y lo volvemos naive
+        if x.tzinfo is not None:
+            x = x.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        return _np.datetime64(x, "ns").astype("int64")
+
+    if isinstance(x, (list, tuple)):
+        return type(x)(_to_collatable(v) for v in x)
+    if isinstance(x, dict):
+        return {k: _to_collatable(v) for k, v in x.items()}
+    return x
+
+def safe_collate(batch):
+    from torch.utils.data._utils.collate import default_collate
+    return default_collate([_to_collatable(b) for b in batch])
+# ---------------------------------------------------------------------
+
+import pandas as pd
+import yaml
+from dataclasses import dataclass
+from datetime import timedelta
+
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+from sklearn.covariance import LedoitWolf
+import optuna
+
+from training.itransformer_full import ITransformerFull
+from evaluation.event_stream_dataset import EventStreamWindowDataset
+from evaluation.checkpointing import safe_json_load, save_checkpoint_pt, load_checkpoint_pt, write_state_json
+from evaluation.policy_gates import thresholds_from_val, gate_report
+
+EPS = 1e-12
+
+def seed_all(seed: int):
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+def device_auto():
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+def atomic_write_json(path: Path, obj: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(path)
+
+def load_cfg(path: str) -> dict:
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+def _mget(m: dict, keys: list[str], default: float) -> float:
+    for k in keys:
+        if k in m and m[k] is not None:
+            try:
+                return float(m[k])
+            except Exception:
+                pass
+    return float(default)
+
+def normalize_backtest_metrics(m: dict) -> dict:
+    """
+    Garantiza llaves estándar aunque el backtest regrese algo mínimo.
+    """
+    m = dict(m or {})
+    n_trades = int(m.get("n_trades", m.get("trades", m.get("num_trades", 0))) or 0)
+
+    pf = _mget(m, ["profit_factor", "pf", "profitFactor"], 0.0)
+    mdd = _mget(m, ["max_drawdown", "max_dd", "mdd", "maxDD"], 1.0)
+    wr = _mget(m, ["winrate", "win_rate", "wr"], 0.0)
+
+    m["n_trades"] = n_trades
+    m["profit_factor"] = pf
+    m["max_drawdown"] = mdd
+    m["winrate"] = wr
+    return m
+
+def load_all(glob_path: str, date_min: str = "", date_max: str = "") -> pd.DataFrame:
+    files = sorted(glob.glob(glob_path))
+    if not files:
+        raise SystemExit(f"No files found for glob: {glob_path}")
+    dfs = [pd.read_parquet(f, engine="pyarrow") for f in files]
+    df = pd.concat(dfs, ignore_index=True)
+    df["ds"] = pd.to_datetime(df["ds"], utc=True)
+
+    if date_min:
+        df = df[df["ds"] >= pd.to_datetime(date_min, utc=True)]
+    if date_max:
+        df = df[df["ds"] <= pd.to_datetime(date_max, utc=True)]
+
+    df = df.sort_values(["unique_id", "ds"]).reset_index(drop=True)
+    return df
+
+def encode_tbm_hit(s: pd.Series) -> np.ndarray:
+    # sl=0, time=1, tp=2
+    mp = {"sl":0, "time":1, "tp":2}
+    return s.map(mp).astype("int64").to_numpy()
+
+def select_feature_cols(df: pd.DataFrame):
+    # Excluimos targets y campos derivados del stop (para no “aprender la etiqueta” por definición)
+    drop = {"y", "tbm_hit", "sample_weight", "tp_ret", "sl_ret", "hold_bars", "ds", "unique_id"}
+    non_num = {c for c in df.columns if df[c].dtype == "object"}
+    drop |= non_num
+    feats = [c for c in df.columns if (c not in drop) and pd.api.types.is_numeric_dtype(df[c])]
+    # Asegura que OHLCV/ATR estén:
+    for must in ("open","high","low","close","volume","atr"):
+        if must in df.columns and must not in feats and pd.api.types.is_numeric_dtype(df[must]):
+            feats.append(must)
+    return feats
+
+@dataclass
+class Fold:
+    fold_id: int
+    train_start: pd.Timestamp
+    train_end: pd.Timestamp
+    val_end: pd.Timestamp
+    test_end: pd.Timestamp
+
+def make_folds(df: pd.DataFrame, cfg: dict):
+    w = cfg["walkforward"]
+    train_days = int(w["train_days"])
+    val_days = int(w["val_days"])
+    test_days = int(w["test_days"])
+    step_days = int(w["step_days"])
+    max_folds = int(cfg["data"]["max_folds"])
+
+    ds_min = df["ds"].min()
+    ds_max = df["ds"].max()
+
+    start = ds_min + timedelta(days=30)
+    folds = []
+    fid = 0
+    while True:
+        train_start = start
+        train_end = train_start + timedelta(days=train_days)
+        val_end = train_end + timedelta(days=val_days)
+        test_end = val_end + timedelta(days=test_days)
+        if test_end > ds_max:
+            break
+        folds.append(Fold(fid, train_start, train_end, val_end, test_end))
+        fid += 1
+        if fid >= max_folds:
+            break
+        start = start + timedelta(days=step_days)
+
+    if not folds:
+        raise ValueError("No folds created. Reduce days or increase data window.")
+    return folds
+
+class WindowDataset(Dataset):
+    def __init__(self, df: pd.DataFrame, feature_cols, lookback: int, label_shift: int,
+                 start: pd.Timestamp, end: pd.Timestamp, fit_scaler=False, scaler=None):
+        self.feature_cols = feature_cols
+        self.lookback = lookback
+        self.shift = label_shift
+        self.start = start
+        self.end = end
+
+        # Normalizamos límites a datetime64[ns] naive (UTC)
+        self.start64 = pd.Timestamp(start).tz_convert('UTC').tz_localize(None).to_datetime64()
+        self.end64   = pd.Timestamp(end).tz_convert('UTC').tz_localize(None).to_datetime64()
+        if "sample_weight" in df.columns:
+            df = df[df["sample_weight"] > 0].copy()
+
+        self.df = df.sort_values(["unique_id","ds"]).reset_index(drop=True)
+
+        self.series = {}
+        for uid, g in self.df.groupby("unique_id", sort=False):
+            g = g.reset_index(drop=True)
+            X = g[feature_cols].to_numpy(dtype=np.float32)
+            y = g["y"].to_numpy(dtype=np.float32)
+            ycls = encode_tbm_hit(g["tbm_hit"]) if "tbm_hit" in g.columns else np.zeros(len(g), dtype=np.int64)
+            ds = g["ds"].dt.tz_convert("UTC").dt.tz_localize(None).to_numpy(dtype="datetime64[ns]")
+            # para backtest y alineación:
+            ohlc = g[["open","high","low","close"]].to_numpy(dtype=np.float32) if all(c in g.columns for c in ["open","high","low","close"]) else None
+            atr = g["atr"].to_numpy(dtype=np.float32) if "atr" in g.columns else None
+            tp_ret = g["tp_ret"].to_numpy(dtype=np.float32) if "tp_ret" in g.columns else None
+            sl_ret = g["sl_ret"].to_numpy(dtype=np.float32) if "sl_ret" in g.columns else None
+            hold = g["hold_bars"].to_numpy(dtype=np.int32) if "hold_bars" in g.columns else None
+
+            self.series[uid] = {"X":X, "y":y, "yc":ycls, "ds":ds, "ohlc":ohlc, "atr":atr, "tp_ret":tp_ret, "sl_ret":sl_ret, "hold":hold}
+
+        if fit_scaler:
+            all_train = []
+            for uid, obj in self.series.items():
+                ds = obj["ds"]
+                idx = np.where((ds >= self.start64) & (ds < self.end64))[0]
+                if len(idx):
+                    all_train.append(obj["X"][idx])
+            A = np.vstack(all_train) if all_train else np.zeros((1, len(feature_cols)), dtype=np.float32)
+            mu = A.mean(axis=0)
+            sd = A.std(axis=0)
+            sd = np.clip(sd, 1e-6, None)
+            self.scaler = {"mu": mu, "sd": sd}
+        else:
+            if scaler is None:
+                raise ValueError("Scaler required when fit_scaler=False")
+            self.scaler = scaler
+
+        mu = self.scaler["mu"]; sd = self.scaler["sd"]
+        for uid in self.series.keys():
+            self.series[uid]["X"] = (self.series[uid]["X"] - mu) / sd
+
+        self.samples = []
+        for uid, obj in self.series.items():
+            ds = obj["ds"]
+            n = len(ds)
+            for i in range(self.lookback - 1, n - self.shift):
+                t_ds = ds[i + self.shift]
+                if (t_ds >= self.start64) and (t_ds < self.end64):
+                    self.samples.append((uid, i))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        uid, i = self.samples[idx]
+        obj = self.series[uid]
+        X = obj["X"][i - self.lookback + 1 : i + 1]  # [L,F]
+        y = obj["y"][i + self.shift]
+        yc = obj["yc"][i + self.shift]
+        ds = obj["ds"][i + self.shift]
+        return torch.from_numpy(X), torch.tensor(y), torch.tensor(yc), str(uid), np.datetime64(ds)
+
+def pinball_loss(pred, target, quantiles):
+    # pred [B,Q], target [B]
+    losses = []
+    for qi, q in enumerate(quantiles):
+        e = target - pred[:, qi]
+        losses.append(torch.maximum(q*e, (q-1)*e))
+    return torch.stack(losses, dim=1).mean()
+
+def compute_class_weights(yc: np.ndarray, n_classes=3):
+    counts = np.bincount(yc, minlength=n_classes).astype(np.float64)
+    counts = np.clip(counts, 1.0, None)
+    w = counts.sum() / counts
+    w = w / w.mean()
+    return w.astype(np.float32)
+
+def fit_ood(emb_train: np.ndarray):
+    # LedoitWolf shrinkage covariance
+    lw = LedoitWolf().fit(emb_train)
+    mu = lw.location_.astype(np.float32)
+    prec = lw.precision_.astype(np.float32)  # inverse covariance
+    return mu, prec
+
+def mahalanobis(emb: np.ndarray, mu: np.ndarray, prec: np.ndarray):
+    d = emb - mu[None, :]
+    # sqrt((x-mu)T Prec (x-mu))
+    m = np.einsum("bi,ij,bj->b", d, prec, d)
+    return np.sqrt(np.clip(m, 0.0, None))
+
+def softmax_np(logits: np.ndarray):
+    x = logits - logits.max(axis=1, keepdims=True)
+    e = np.exp(x)
+    return e / np.clip(e.sum(axis=1, keepdims=True), EPS, None)
+
+def build_pred_table(model, dl, dev, quantiles, mu_ood=None, prec_ood=None, ood_q=None):
+    model.eval()
+    rows = []
+    with torch.no_grad():
+        for X, y, yc, uid, ds in dl:
+            X = X.to(dev)
+            quant, logits, emb = model(X)
+            quant = quant.cpu().numpy()
+            logits = logits.cpu().numpy()
+            emb = emb.cpu().numpy()
+            probs = softmax_np(logits)
+            probs = np.clip(probs, 1e-6, 1.0)
+            probs = probs / probs.sum(axis=1, keepdims=True)
+
+            ood = None
+            do_pred = np.ones(len(quant), dtype=np.int8)
+            if (mu_ood is not None) and (prec_ood is not None):
+                ood = mahalanobis(emb, mu_ood, prec_ood)
+                if ood_q is not None:
+                    do_pred = (ood <= ood_q).astype(np.int8)
+
+            for i in range(len(quant)):
+                rows.append({
+                    "unique_id": uid[i],
+                    "ds": pd.to_datetime(ds[i]).tz_localize("UTC") if pd.to_datetime(ds[i]).tzinfo is None else pd.to_datetime(ds[i]),
+                    "y_true": float(y[i].item()),
+                    "yc_true": int(yc[i].item()),
+                    "q10": float(quant[i,0]), "q50": float(quant[i,1]), "q90": float(quant[i,2]),
+                    "p_sl": float(probs[i,0]), "p_time": float(probs[i,1]), "p_tp": float(probs[i,2]),
+                    "p_edge": float(probs[i,2] - probs[i,0]),
+                    "ood": float(ood[i]) if ood is not None else np.nan,
+                    "do_predict": int(do_pred[i]),
+                })
+    return pd.DataFrame(rows).sort_values(["unique_id","ds"]).reset_index(drop=True)
+
+def backtest_policy(cfg, df_slice: pd.DataFrame, pred_df: pd.DataFrame, params: dict):
+    # Merge preds with market data
+    m = df_slice.merge(pred_df, on=["unique_id","ds"], how="inner").sort_values(["unique_id","ds"]).reset_index(drop=True)
+    if m.empty:
+        return pd.DataFrame(), {"n_trades":0}
+
+    fee = float(cfg["execution"]["fee_per_side"])
+    spread_bps = float(cfg["execution"]["spread_bps"])
+    slip_bps = float(cfg["execution"]["slippage_bps_per_side"])
+    half_spread = spread_bps / 2.0
+
+    # policy params
+    enter_q50 = float(params["enter_q50_min"])
+    enter_q10 = float(params["enter_q10_min"])
+    enter_ratio = float(params["enter_tp_sl_ratio"])
+    exit_q50_below = float(params["exit_q50_below"])
+    exit_p_sl = float(params["exit_p_sl_max"])
+    ood_thr = float(params["ood_thr"])
+    cooldown = int(params["cooldown_bars"])
+
+    trades = []
+    for uid, g in m.groupby("unique_id", sort=False):
+        g = g.sort_values("ds").reset_index(drop=True)
+        in_pos = False
+        entry_i = None
+        entry_price = None
+        tp_price = None
+        sl_price = None
+        hold_limit_i = None
+        cooldown_left = 0
+
+        for i in range(len(g)-2):  # usamos i+1 open
+            if cooldown_left > 0:
+                cooldown_left -= 1
+                continue
+
+            # Primero: si estamos en posición, chequea hits intrabar de la vela i
+            if in_pos:
+                hi = float(g.loc[i, "high"]); lo = float(g.loc[i, "low"])
+                # Conservador: si toca ambos, SL primero
+                if (lo <= sl_price) and (hi >= tp_price):
+                    exit_px = sl_price
+                    # costos en exit: spread+slip y fee
+                    exit_px *= (1.0 - (half_spread + slip_bps)/10000.0)
+                    ret = (exit_px - entry_price) / max(entry_price, EPS) - 2.0*fee
+                    trades.append({"unique_id":uid, "entry_ds":g.loc[entry_i,"ds"], "exit_ds":g.loc[i,"ds"], "reason":"SL_both", "ret":float(ret)})
+                    in_pos = False; cooldown_left = cooldown
+                    continue
+                elif lo <= sl_price:
+                    exit_px = sl_price
+                    exit_px *= (1.0 - (half_spread + slip_bps)/10000.0)
+                    ret = (exit_px - entry_price) / max(entry_price, EPS) - 2.0*fee
+                    trades.append({"unique_id":uid, "entry_ds":g.loc[entry_i,"ds"], "exit_ds":g.loc[i,"ds"], "reason":"SL", "ret":float(ret)})
+                    in_pos = False; cooldown_left = cooldown
+                    continue
+                elif hi >= tp_price:
+                    exit_px = tp_price
+                    exit_px *= (1.0 - (half_spread + slip_bps)/10000.0)
+                    ret = (exit_px - entry_price) / max(entry_price, EPS) - 2.0*fee
+                    trades.append({"unique_id":uid, "entry_ds":g.loc[entry_i,"ds"], "exit_ds":g.loc[i,"ds"], "reason":"TP", "ret":float(ret)})
+                    in_pos = False; cooldown_left = cooldown
+                    continue
+
+                # Time-stop (hold adaptativo)
+                if i >= hold_limit_i:
+                    exit_px = float(g.loc[i+1, "open"])  # salida en open siguiente
+                    exit_px *= (1.0 - (half_spread + slip_bps)/10000.0)
+                    ret = (exit_px - entry_price) / max(entry_price, EPS) - 2.0*fee
+                    trades.append({"unique_id":uid, "entry_ds":g.loc[entry_i,"ds"], "exit_ds":g.loc[i+1,"ds"], "reason":"TIME", "ret":float(ret)})
+                    in_pos = False; cooldown_left = cooldown
+                    continue
+
+                # Salida en vuelo (re-inferencia): decidimos al cierre de i y ejecutamos en open i+1
+                if (float(g.loc[i, "do_predict"]) == 0) or (float(g.loc[i, "ood"]) > ood_thr) or (float(g.loc[i,"q50"]) < exit_q50_below) or (float(g.loc[i,"p_sl"]) > exit_p_sl):
+                    exit_px = float(g.loc[i+1, "open"])
+                    exit_px *= (1.0 - (half_spread + slip_bps)/10000.0)
+                    ret = (exit_px - entry_price) / max(entry_price, EPS) - 2.0*fee
+                    trades.append({"unique_id":uid, "entry_ds":g.loc[entry_i,"ds"], "exit_ds":g.loc[i+1,"ds"], "reason":"EDGE_DECAY", "ret":float(ret)})
+                    in_pos = False; cooldown_left = cooldown
+                    continue
+
+            # Entrada (si no hay posición): decisión en i, ejecución en i+1 open
+            if not in_pos:
+                if (float(g.loc[i, "do_predict"]) == 0) or (float(g.loc[i, "ood"]) > ood_thr):
+                    continue
+
+                q50 = float(g.loc[i, "q50"])
+                q10 = float(g.loc[i, "q10"])
+                p_tp = float(g.loc[i, "p_tp"])
+                p_sl = float(g.loc[i, "p_sl"])
+                ratio = p_tp / max(p_sl, 1e-6)
+
+                if (q50 >= enter_q50) and (q10 >= enter_q10) and (ratio >= enter_ratio):
+                    entry_px = float(g.loc[i+1, "open"])
+                    # compra: paga spread/2 + slip
+                    entry_px *= (1.0 + (half_spread + slip_bps)/10000.0)
+
+                    # TP/SL por ATR en el momento de señal (i)
+                    tp_ret = float(g.loc[i, "tp_ret"])
+                    sl_ret = float(g.loc[i, "sl_ret"])
+                    tp_price = entry_px * (1.0 + tp_ret)
+                    sl_price = entry_px * (1.0 - sl_ret)
+
+                    hold_bars = int(g.loc[i, "hold_bars"])
+                    hold_limit_i = min(i + max(hold_bars, 1), len(g)-2)
+
+                    in_pos = True
+                    entry_i = i+1
+                    entry_price = entry_px
+
+        # cerrar al final si quedó abierto
+        if in_pos:
+            exit_px = float(g.loc[len(g)-1, "close"])
+            exit_px *= (1.0 - (half_spread + slip_bps)/10000.0)
+            ret = (exit_px - entry_price) / max(entry_price, EPS) - 2.0*fee
+            trades.append({"unique_id":uid, "entry_ds":g.loc[entry_i,"ds"], "exit_ds":g.loc[len(g)-1,"ds"], "reason":"EOD", "ret":float(ret)})
+
+    tdf = pd.DataFrame(trades)
+    if tdf.empty:
+        return tdf, {"n_trades":0}
+
+    r = tdf["ret"].to_numpy()
+    win = float((r > 0).mean())
+    avg = float(r.mean())
+    pf = float(r[r>0].sum() / max(abs(r[r<0].sum()), EPS))
+    eq = np.cumprod(1.0 + r)
+    dd = 1.0 - (eq / np.maximum.accumulate(eq))
+    mdd = float(dd.max())
+
+    return tdf, {"n_trades": int(len(tdf)), "winrate": win, "avg_ret": avg, "profit_factor": pf, "max_drawdown": mdd}
+
+def objective_factory(cfg, df_val_slice, pred_val, pct_cfg):
+    tune = cfg["tuning"]
+    dd_pen = float(tune["dd_penalty"])
+    min_tr = int(tune["min_trades_per_fold"])
+
+    def obj(trial: optuna.Trial):
+        # ---- Optuna busca percentiles (robusto a escala) ----
+        enter_q50_pct = trial.suggest_float("enter_q50_pct", 0.80, 0.97)
+        enter_q10_pct = trial.suggest_float("enter_q10_pct", 0.35, 0.70)
+        ood_pct       = trial.suggest_float("ood_pct",       0.80, 0.98)
+        exit_q50_pct  = trial.suggest_float("exit_q50_pct",  0.15, 0.55)
+        exit_p_sl_pct = trial.suggest_float("exit_p_sl_pct", 0.60, 0.98)
+
+        pct_cfg_trial = {
+            "enter_q50_pct": enter_q50_pct,
+            "enter_q10_pct": enter_q10_pct,
+            "ood_pct": ood_pct,
+            "exit_q50_pct": exit_q50_pct,
+            "exit_p_sl_pct": exit_p_sl_pct,
+        }
+
+        # Se calculan thresholds absolutos desde VAL
+        thr = thresholds_from_val(pred_val, pct_cfg_trial)
+
+        # Params finales (compatibles con tu backtester actual)
+        params = {
+            "enter_q50_min": float(thr["enter_q50_min"]),
+            "enter_q10_min": float(thr["enter_q10_min"]),
+            "enter_tp_sl_ratio": trial.suggest_float("enter_tp_sl_ratio", 1.0, 3.5),
+            "exit_q50_below": float(thr["exit_q50_below"]),
+            "exit_p_sl_max": float(thr["exit_p_sl_max"]),
+            "cooldown_bars": trial.suggest_int("cooldown_bars", 0, 2),
+            "ood_thr": float(thr["ood_q"]),
+        }
+
+        trades, met = backtest_policy(cfg, df_val_slice, pred_val, params)
+        met = normalize_backtest_metrics(met)
+        n_trades = met["n_trades"]
+
+        # Si no hay trades, NO crashees: penaliza y registra el motivo
+        if n_trades == 0:
+            print(f"[optuna] n_trades=0 -> met={met} | params={params}")
+            return -1000.0
+
+        # Penalización gradual por pocos trades (evita que Optuna “muera”)
+        trade_penalty = float(cfg.get("tuning", {}).get("trade_penalty", 10.0))
+        shortfall = max(0, min_tr - n_trades)
+
+        score_base = (
+            met["profit_factor"]
+            - dd_pen * met["max_drawdown"]
+            + 0.15 * (met["winrate"] - 0.5)
+        )
+
+        score = score_base - shortfall * trade_penalty
+
+        print(
+            f"[optuna] n_trades={n_trades} pf={met['profit_factor']:.3f} "
+            f"mdd={met['max_drawdown']:.3f} wr={met['winrate']:.3f} "
+            f"score={score:.3f} shortfall={shortfall}"
+        )
+
+        return float(score)
+
+    return obj
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True)
+    args = ap.parse_args()
+
+    cfg = load_cfg(args.config)
+    seed_all(int(cfg["train"]["seed"]))
+    dev = device_auto()
+
+    pct_defaults = {
+        "enter_q50_pct": 0.90,   # top 10% de q50 para entrar
+        "enter_q10_pct": 0.55,   # q10 debe ser “no tan malo”
+        "ood_pct": 0.95,         # filtra solo el 5% más OOD
+        "exit_q50_pct": 0.35,    # si q50 cae al tercio bajo, salida
+        "exit_p_sl_pct": 0.90,   # si p(sl) sube al top 10%, salida
+    }
+
+    pcfg = cfg.get("policy", {})
+    pct_cfg = {
+        "enter_q50_pct": float(pcfg.get("enter_q50_pct", pct_defaults["enter_q50_pct"])),
+        "enter_q10_pct": float(pcfg.get("enter_q10_pct", pct_defaults["enter_q10_pct"])),
+        "ood_pct": float(pcfg.get("ood_pct", pct_defaults["ood_pct"])),
+        "exit_q50_pct": float(pcfg.get("exit_q50_pct", pct_defaults["exit_q50_pct"])),
+        "exit_p_sl_pct": float(pcfg.get("exit_p_sl_pct", pct_defaults["exit_p_sl_pct"])),
+    }
+
+    df = load_all(cfg["data"]["in_glob"], cfg["data"].get("date_min",""), cfg["data"].get("date_max",""))
+
+    # Filter out events with tp_ret < min_tp_net (unprofitable after costs)
+    fee = float(cfg["execution"]["fee_per_side"])
+    slip = float(cfg["execution"]["slippage_bps_per_side"]) / 10000.0
+    sprd = float(cfg["execution"]["spread_bps"]) / 10000.0
+    buff = 0.0002  # buffer adicional
+    min_tp_net = (2.0 * fee) + slip + sprd + buff
+
+    if "tp_ret" in df.columns and "sample_weight" in df.columns:
+        m = df["tp_ret"].astype("float64") >= min_tp_net
+        before = float(df["sample_weight"].sum())
+        df.loc[~m, "sample_weight"] = 0.0
+        after = float(df["sample_weight"].sum())
+        print(f"[filter] tp_ret<min_tp_net => weight=0 | min_tp_net={min_tp_net:.6f} | weight_sum {before:.2f}->{after:.2f} | kept={(m.mean()*100):.2f}%")
+
+    feats = select_feature_cols(df)
+
+    folds = make_folds(df, cfg)
+    run_dir = os.path.join("reports", "full_run")
+    os.makedirs(run_dir, exist_ok=True)
+    os.makedirs(os.path.join("models","full_itransformer"), exist_ok=True)
+
+    all_fold_metrics = []
+
+    for fold in folds:
+        print(f"\n=== FOLD {fold.fold_id} ===")
+        print("train:", fold.train_start, "->", fold.train_end)
+        print("val  :", fold.train_end, "->", fold.val_end)
+        print("test :", fold.val_end, "->", fold.test_end)
+
+        mcfg = cfg["model"]
+        tcfg = cfg["train"]
+        quantiles = torch.tensor(cfg["quantiles"], dtype=torch.float32, device=dev)
+
+        sampling = cfg.get("sampling", {})
+        mode = sampling.get("mode", "window")
+
+        if mode == "event_stream":
+            ds_train = EventStreamWindowDataset(
+                df=df,
+                feature_cols=feats,
+                lookback=int(mcfg["lookback"]),
+                steps_per_epoch=int(sampling.get("steps_per_epoch", 2500)),
+                p_event=float(sampling.get("p_event", 0.75)),
+                event_params=sampling.get("event_params", {}),
+                seed=12345 + fold.fold_id,
+                weight_col=("sample_weight" if "sample_weight" in df.columns else None),
+            )
+            # For event_stream, we need to fit scaler separately since EventStreamWindowDataset doesn't do it
+            # Create a temporary WindowDataset to fit scaler
+            temp_ds = WindowDataset(df, feats, int(mcfg["lookback"]), int(mcfg["label_shift"]), fold.train_start, fold.train_end, fit_scaler=True)
+            scaler = temp_ds.scaler
+        else:
+            ds_train = WindowDataset(df, feats, int(mcfg["lookback"]), int(mcfg["label_shift"]), fold.train_start, fold.train_end, fit_scaler=True)
+            scaler = ds_train.scaler
+
+        # VAL and TEST remain contiguos with normal WindowDataset
+        ds_val = WindowDataset(df, feats, int(mcfg["lookback"]), int(mcfg["label_shift"]), fold.train_end, fold.val_end, fit_scaler=False, scaler=scaler)
+        ds_test = WindowDataset(df, feats, int(mcfg["lookback"]), int(mcfg["label_shift"]), fold.val_end, fold.test_end, fit_scaler=False, scaler=scaler)
+
+        dl_train = DataLoader(ds_train, collate_fn=safe_collate, batch_size=int(tcfg["batch_size"]), shuffle=True, drop_last=True, num_workers=0, pin_memory=False, persistent_workers=False)
+        dl_val = DataLoader(ds_val, collate_fn=safe_collate, batch_size=int(tcfg["batch_size"]), shuffle=False, num_workers=0, pin_memory=False, persistent_workers=False)
+        dl_test = DataLoader(ds_test, collate_fn=safe_collate, batch_size=int(tcfg["batch_size"]), shuffle=False, num_workers=0, pin_memory=False, persistent_workers=False)
+
+        # class weights for CE
+        ycs = []
+        for _, _, yc, *_ in dl_train:
+            ycs.append(yc.numpy())
+        ycs = np.concatenate(ycs) if ycs else np.zeros(1, dtype=np.int64)
+        cw = compute_class_weights(ycs, n_classes=3)
+        ce = nn.CrossEntropyLoss(weight=torch.tensor(cw, device=dev))
+
+        model = ITransformerFull(
+            lookback=int(mcfg["lookback"]),
+            n_features=len(feats),
+            patch_len=int(mcfg["patch_len"]),
+            d_model=int(mcfg["d_model"]),
+            n_heads=int(mcfg["n_heads"]),
+            n_layers_time=int(mcfg["n_layers_time"]),
+            n_layers_feat=int(mcfg["n_layers_feat"]),
+            dropout=float(mcfg["dropout"]),
+            n_quantiles=len(cfg["quantiles"]),
+            n_classes=3,
+        ).to(dev)
+
+        opt = torch.optim.AdamW(model.parameters(), lr=float(tcfg["lr"]), weight_decay=float(tcfg["weight_decay"]))
+        scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=2)  # reduce LR if val_loss no mejora en 2 epochs
+        grad_clip = float(tcfg["grad_clip"])
+        alpha = float(mcfg["loss_alpha_cls"])
+
+        # Check for resume
+        out_dir = os.path.join("models","full_itransformer")
+        state_path = f"{out_dir}/fold{fold.fold_id}_state.json"
+        state = safe_json_load(state_path)
+
+        start_epoch = 1
+        best_val = float("inf")
+        bad = 0
+        if state is not None:
+            ckpt_path = state.get("ckpt_path", "")
+            if ckpt_path:
+                payload = load_checkpoint_pt(
+                    ckpt_path=ckpt_path,
+                    model=model,
+                    optimizer=opt,
+                    scheduler=scheduler,
+                    device=dev,
+                )
+                if payload is not None:
+                    start_epoch = int(payload.get("epoch", state.get("epoch", 0))) + 1
+                    best_val = float(payload.get("best_val", state.get("best_val", best_val)))
+                    bad = int(state.get("bad_epochs", bad))
+                    print(f"[RESUME] fold={fold.fold_id} desde epoch {start_epoch} (best_val={best_val}, bad={bad})")
+            else:
+                print("[WARN] state sin ckpt_path. Se inicia sin resume real.")
+
+        # logging
+        tb_dir = os.path.join("logs", f"fold_{fold.fold_id}")
+        os.makedirs(tb_dir, exist_ok=True)
+        writer = SummaryWriter(tb_dir)
+
+        patience = int(tcfg["patience"])
+        epochs = int(tcfg["epochs"])
+
+        for ep in range(start_epoch, epochs+1):
+            model.train()
+            tr_losses = []
+            tr_pin = []
+            tr_ce = []
+
+            for X, y, yc, *_ in dl_train:
+                X = X.to(dev); y = y.to(dev); yc = yc.to(dev)
+                quant, logits, _ = model(X)
+                l_pin = pinball_loss(quant, y, quantiles)
+                l_ce = ce(logits, yc)
+                loss = l_pin + alpha * l_ce
+
+                opt.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                opt.step()
+
+                tr_losses.append(loss.item())
+                tr_pin.append(l_pin.item())
+                tr_ce.append(l_ce.item())
+
+            model.eval()
+            va_losses = []
+            va_pin = []
+            va_ce = []
+            with torch.no_grad():
+                for X, y, yc, *_ in dl_val:
+                    X = X.to(dev); y = y.to(dev); yc = yc.to(dev)
+                    quant, logits, _ = model(X)
+                    l_pin = pinball_loss(quant, y, quantiles)
+                    l_ce = ce(logits, yc)
+                    loss = l_pin + alpha * l_ce
+                    va_losses.append(loss.item())
+                    va_pin.append(l_pin.item())
+                    va_ce.append(l_ce.item())
+
+            trL = float(np.mean(tr_losses)); vaL = float(np.mean(va_losses))
+            writer.add_scalar("loss/train", trL, ep)
+            writer.add_scalar("loss/val", vaL, ep)
+            writer.add_scalar("pinball/train", float(np.mean(tr_pin)), ep)
+            writer.add_scalar("pinball/val", float(np.mean(va_pin)), ep)
+            writer.add_scalar("ce/train", float(np.mean(tr_ce)), ep)
+            writer.add_scalar("ce/val", float(np.mean(va_ce)), ep)
+
+            scheduler.step(vaL)
+            print(f"[fold {fold.fold_id}] ep {ep} loss train={trL:.6f} val={vaL:.6f}")
+
+            ckpt_path = f"{out_dir}/fold{fold.fold_id}_last.pt"
+            save_checkpoint_pt(
+                ckpt_path=ckpt_path,
+                model=model,
+                optimizer=opt,
+                scheduler=scheduler,
+                epoch=ep,
+                best_val=best_val,
+                extra={"val_loss": float(vaL)},
+            )
+
+            write_state_json(
+                state_path=f"{out_dir}/fold{fold.fold_id}_state.json",
+                fold_id=fold.fold_id,
+                epoch=ep,
+                best_val=best_val,
+                bad_epochs=bad,
+                ckpt_path=ckpt_path,
+            )
+
+            if vaL + 1e-8 < best_val:
+                best_val = vaL
+                bad = 0
+                # --- scaler: compatible con WindowDataset y EventStreamWindowDataset ---
+                scaler_mu = None
+                scaler_sd = None
+                if hasattr(ds_train, "scaler") and isinstance(getattr(ds_train, "scaler"), dict):
+                    scaler_mu = ds_train.scaler.get("mu", None)
+                    scaler_sd = ds_train.scaler.get("sd", None)
+
+                # Si quieres persistir el scaler en disco para inference:
+                # - En event-driven: se queda None
+                # - En window clásico: guarda mu/sd
+                ckpt = {
+                    "model_state": model.state_dict(),
+                    "scaler_mu": None if scaler_mu is None else scaler_mu.tolist() if hasattr(scaler_mu, "tolist") else scaler_mu,
+                    "scaler_sd": None if scaler_sd is None else scaler_sd.tolist() if hasattr(scaler_sd, "tolist") else scaler_sd,
+                    "feature_cols": feats,
+                    "cfg": cfg,
+                }
+                torch.save(ckpt, os.path.join("models","full_itransformer", f"fold{fold.fold_id}.pt"))
+            else:
+                bad += 1
+                if bad >= patience:
+                    print(f"[fold {fold.fold_id}] early stop.")
+                    break
+
+        writer.close()
+
+        # Load best
+        ckpt = torch.load(os.path.join("models","full_itransformer", f"fold{fold.fold_id}.pt"), map_location=dev)
+        model.load_state_dict(ckpt["model_state"])
+        model.eval()
+
+        # Fit OOD on train embeddings
+        emb_list = []
+        with torch.no_grad():
+            for X, _, _, *_ in dl_train:
+                X = X.to(dev)
+                _, _, emb = model(X)
+                emb_list.append(emb.cpu().numpy())
+        emb_train = np.vstack(emb_list) if emb_list else np.zeros((1, int(cfg["model"]["d_model"])), dtype=np.float32)
+        mu_ood, prec_ood = fit_ood(emb_train)
+        ood_train = mahalanobis(emb_train, mu_ood, prec_ood)
+
+        # ood baseline threshold (we tune later, but keep for do_predict table)
+        ood_base_thr = float(np.quantile(ood_train, 0.99))
+
+        # Build predictions for val/test
+        pred_val = build_pred_table(model, dl_val, dev, quantiles, mu_ood, prec_ood, ood_q=ood_base_thr)
+        pred_test = build_pred_table(model, dl_test, dev, quantiles, mu_ood, prec_ood, ood_q=ood_base_thr)
+
+        print("[q50 val] p50/p90/p97:", np.quantile(pred_val["q50"], [0.5,0.9,0.97]))
+        print("[y val] p50/p90/p97:", np.quantile(pred_val["y_true"], [0.5, 0.9, 0.97]))
+
+        # Slice raw df for val/test window (needed for realistic backtest)
+        df_val_slice = df[(df["ds"] >= fold.train_end) & (df["ds"] < fold.val_end)].copy()
+        df_test_slice = df[(df["ds"] >= fold.val_end) & (df["ds"] < fold.test_end)].copy()
+
+        # Tuning policy on VAL (Optuna)
+        obj = objective_factory(cfg, df_val_slice, pred_val, pct_cfg)
+        study = optuna.create_study(direction="maximize")
+        n_trials = int(cfg["tuning"]["n_trials"])
+        timeout = int(cfg["tuning"]["timeout_sec"])
+        if timeout and timeout > 0:
+            study.optimize(obj, n_trials=n_trials, timeout=timeout)
+        else:
+            study.optimize(obj, n_trials=n_trials)
+
+        best_params = study.best_params.copy()
+        # Convert ood_q -> ood_thr (numerical)
+        q = float(best_params.pop("ood_q"))
+        best_params["ood_thr"] = float(np.nanquantile(pred_val["ood"].to_numpy(), q))
+
+        # Evaluate best policy on TEST
+        # Debug gates
+        eligible = np.ones(len(pred_test), dtype=bool)
+        if "sample_weight" in df_test_slice.columns:
+            merged = df_test_slice.merge(pred_test, on=["unique_id","ds"], how="inner")
+            eligible = (merged["sample_weight"].to_numpy() > 0)
+        ood_ok = (pred_test["ood"].to_numpy() <= best_params["ood_thr"])
+        q50 = pred_test["q50"].to_numpy()
+        q10 = pred_test["q10"].to_numpy()
+        entry_ok = (q50 >= best_params["enter_q50_min"]) & (q10 >= best_params["enter_q10_min"])
+
+        gate_report(
+            tag=f"fold{fold.fold_id}/best",
+            eligible_mask=eligible,
+            ood_mask=ood_ok,
+            entry_mask=entry_ok,
+            trades_n=None
+        )
+        print(
+            f"[thr] enter_q50_min={best_params['enter_q50_min']:.6g} "
+            f"enter_q10_min={best_params['enter_q10_min']:.6g} "
+            f"ood_q={best_params['ood_thr']:.6g} "
+            f"exit_q50_below={best_params['exit_q50_below']:.6g} "
+            f"exit_p_sl_max={best_params['exit_p_sl_max']:.6g}"
+        )
+
+        trades_test, met_test = backtest_policy(cfg, df_test_slice, pred_test, best_params)
+
+        # Save artifacts
+        fold_dir = os.path.join(run_dir, f"fold_{fold.fold_id}")
+        os.makedirs(fold_dir, exist_ok=True)
+
+        pred_val.to_parquet(os.path.join(fold_dir, "pred_val.parquet"), index=False, compression="zstd")
+        pred_test.to_parquet(os.path.join(fold_dir, "pred_test.parquet"), index=False, compression="zstd")
+        if not trades_test.empty:
+            trades_test.to_parquet(os.path.join(fold_dir, "trades_test.parquet"), index=False, compression="zstd")
+
+        with open(os.path.join(fold_dir, "best_policy.json"), "w") as f:
+            json.dump(best_params, f, indent=2)
+
+        with open(os.path.join(fold_dir, "metrics_test.json"), "w") as f:
+            json.dump(met_test, f, indent=2)
+
+        row = {"fold": fold.fold_id, **met_test}
+        all_fold_metrics.append(row)
+
+        print(f"[fold {fold.fold_id}] TEST metrics:", met_test)
+
+    # Summary
+    sm = pd.DataFrame(all_fold_metrics)
+    sm_path = os.path.join(run_dir, "summary.csv")
+    sm.to_csv(sm_path, index=False)
+
+    print("\n[OK] FULL pipeline finished.")
+    print("summary:", sm_path)
+    print("tensorboard logs:", "logs/")
+
+if __name__ == "__main__":
+    main()

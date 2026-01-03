@@ -1,0 +1,34 @@
+io:
+  in_glob: data/freqtrade/binance/*-5m.feather
+  out_dir: artifacts/datasets_event
+  compression: zstd
+  cast_float32: true
+
+labeling:
+  long_only: true
+
+  # Si el dataset ya trae atr, úsalo. Si no, lo calcula.
+  atr_period: 14
+
+  # Scalping tight (TP corto, SL más cercano)
+  tp_atr_mult: 0.80
+  sl_atr_mult: 0.60
+
+  # Barrera vertical: NO es "horizonte objetivo", es solo límite para no dejar trades abiertos.
+  hold_adaptive:
+    base_bars: 10        # punto de partida (en 5m, ~50 min) pero se adapta
+    min_bars: 3
+    max_bars: 24
+    ref_ema_span: 288    # ~1 día en 5m, para referencia de volatilidad
+    scale_clip_min: 0.50
+    scale_clip_max: 2.50
+
+  # Costos (conservador). Ajusta si operas maker o tienes fees menores.
+  costs:
+    fee_per_side: 0.001              # 0.10% por lado
+    slippage_bps_per_side: 2         # 2 bps por lado
+    spread_bps: 2                    # 2 bps
+    min_edge_buffer_bps: 5           # buffer extra (evita trades marginales)
+
+  # Si el TP (en retorno) no cubre costo+buffer, se marca sample_weight=0 (aprende a NO operar).
+  skip_if_edge_below_cost: true

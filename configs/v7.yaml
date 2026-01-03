@@ -1,0 +1,68 @@
+project:
+  out_dir: "artifacts"
+  workers: 4
+
+freqtrade:
+  datadir: "data/freqtrade"
+
+universe:
+  anchor_pair: "BTC/USDT"
+  pairs: ["BTC/USDT", "XRP/USDT"]
+
+timeframes:
+  exec_tf: "1m"
+  informative_tfs: ["15m", "1h", "4h"]
+  timeframes_to_download: ["1m", "15m", "1h", "4h"]
+
+quick:
+  enabled: true
+  days: 45
+
+labels:
+  atr_period: 14
+  base_horizon: 12
+  tp_atr_mult: 1.4
+  sl_atr_mult: 1.1
+  vol_window: 96
+  vol_scaled: true
+  # gate "económico" de SIDE (si tu labels_side_v7 lo usa)
+  side_ev_min: 0.0003
+
+features:
+  seq_len: 192
+  adx_period: 14
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bb_period: 20
+  bb_std: 2.0
+  donchian_period: 20
+  vol_lookback: 48
+  chop_period: 14
+  twin_range_fast: 7
+  twin_range_slow: 28
+
+train:
+  batch_size: 128
+  lr: 0.0005
+  epochs: 10
+  early_stop_patience: 3
+  grad_clip: 1.0
+
+model:
+  quantiles: [0.1, 0.5, 0.9]
+  d_model: 192
+  nhead: 6
+  num_layers: 4
+  dropout: 0.12
+  norm_first: true
+
+risk:
+  leverage: 3.0
+  tp_atr_mult: 1.4
+  sl_atr_mult: 1.1
+  max_hold_bars: 16
+  exit_ev_min: 0.0
+  exit_psl_max: 0.55
+  slippage: 0.0002

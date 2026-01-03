@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATADIR="./data/freqtrade/binance"
+DATADIR="./data/freqtrade"
 
 freqtrade convert-data \
-  --format-from json \
+  --format-from feather \
   --format-to parquet \
   --datadir "${DATADIR}"
 
 echo "[OK] Convertido a Parquet en ${DATADIR}"
-

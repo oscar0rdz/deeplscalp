@@ -9,5 +9,5 @@
   "max_gap_seconds": 14400.0,
   "pair": "XRP/USDT",
   "timeframe": "4h",
-  "file": "data/freqtrade/binance/XRP_USDT-4h.feather"
+  "file": "data/freqtrade/XRP_USDT-4h.parquet"
 }

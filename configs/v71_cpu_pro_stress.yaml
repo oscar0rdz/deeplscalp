@@ -1,0 +1,137 @@
+project:
+  out_dir: "artifacts"
+  workers: 1
+
+freqtrade:
+  datadir: "data/freqtrade"
+
+universe:
+  pairs: ["XRP/USDT"]
+  anchor_pair: "BTC/USDT"
+
+timeframes:
+  exec_tf: "1m"
+  informative_tfs: ["15m", "1h", "4h"]
+  timeframes_to_download: ["1m"]
+
+labels:
+  atr_period: 14
+  base_horizon: 18
+  horizon_min: 18
+  horizon_max: 18
+  tp_atr_mult: 1.8
+  sl_atr_mult: 1.1
+  conservative_same_bar: true
+
+  vol_window: 96
+  vol_floor: 1.0e-6
+  vol_scaled: true
+
+  # CLAVE: entrena "como si" el costo fuera mayor (robustez a fricción)
+  label_cost_mult: 2.0
+  side_ev_min: 0.0
+  side_ev_buffer_mult: 1.0
+
+  # pesos
+  w_flat: 1.0
+  w_long: 2.2
+  w_short: 2.2
+  edge_weight_alpha: 1.0
+  time_penalty: 0.85
+  event_boost: 1.25
+
+  # regime/event heurísticos
+  regime_win: 96
+  donchian_win: 48
+  spike_sigma: 4.0
+  trend_slope_z: 1.5
+  rsi_period: 14
+  rsi_lo: 30.0
+  rsi_hi: 70.0
+
+features:
+  seq_len: 192
+  adx_period: 14
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bb_period: 20
+  bb_std: 2.0
+  donchian_period: 20
+  vol_lookback: 48
+  chop_period: 14
+  twin_range_fast: 7
+  twin_range_slow: 28
+
+train:
+  batch_size: 256
+  lr: 0.0002
+  wd: 0.0001
+  epochs: 20
+  early_stop_patience: 7
+  grad_clip: 1.0
+
+  # losses
+  reg_alpha: 1.0
+  cls_alpha_side: 1.0
+  cls_alpha_hit: 0.8
+  cls_alpha_regime: 0.5
+  cls_alpha_event: 0.5
+
+  # class weights
+  side_class_weights: [1.0, 2.0, 2.0]
+  hit_class_weights:  [2.0, 1.0, 2.0]
+  regime_class_weights: [1.2, 1.0, 1.0, 1.5]
+  event_class_weights:  [1.0, 1.3, 1.3, 1.8]
+
+  event_weight: 1.5
+
+model:
+  d_model: 160
+  nhead: 8
+  num_layers: 3
+  dropout: 0.10
+  quantiles: [0.10, 0.50, 0.90]
+  norm_first: true
+
+risk:
+  leverage: 3.0
+  risk_fraction: 0.25
+  max_hold_bars: 16
+  tp_atr_mult: 1.6
+  sl_atr_mult: 1.1
+  exit_ev_min: 0.0
+  exit_psl_max: 0.55
+
+  # costos (ajusta a tu exchange real; Binance Futures varía por VIP/orden)
+  fee_rate: 0.0004
+  slippage: 0.0002
+
+# thresholds de backtest (gating)
+backtest:
+  thr_lookback_bars: 4000
+  score_q: 0.70
+  ood_q: 0.90
+  ev_q: 0.75
+
+  p_side_min: 0.52
+  p_tp_min: 0.20
+  p_sl_max: 0.45
+
+  # CLAVE: buffer para sobrevivir stress
+  ev_abs_min: 0.0
+  ev_buffer_mult: 1.0
+  q_width_mult: 2.5
+
+  use_topk: true
+  top_k: 10
+  cooldown_bars: 1
+
+  regime_policy:
+    range_p_max_for_trade: 0.65
+    breakout_p_min: 0.45
+    rebound_p_min: 0.45
+    spike_p_max: 0.55
+
+cpu_threads: 6

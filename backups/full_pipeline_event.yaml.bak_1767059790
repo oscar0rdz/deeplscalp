@@ -1,0 +1,65 @@
+data:
+  in_glob: artifacts/datasets_event/nf_event_*.parquet
+  # Para no saturar tu Mac en la primera corrida:
+  max_folds: 3
+  date_min: ""
+  date_max: ""
+
+model:
+  lookback: 192            # 192*5m = 16h (más contexto para régimen)
+  label_shift: 1           # señal en t, ejecución en t+1 (sin misma vela)
+  patch_len: 16            # 16*5m = 80min por patch (aprende microestructura)
+  d_model: 192
+  n_heads: 6
+  n_layers_time: 2         # encoder temporal dentro de cada feature
+  n_layers_feat: 4         # encoder cross-feature (iTransformer core)
+  dropout: 0.12
+  loss_alpha_cls: 0.7      # peso clasificación vs cuantiles
+
+train:
+  epochs: 20
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 0.00015
+  grad_clip: 1.0
+  seed: 7
+  patience: 5  # aumentado para más estabilidad con ReduceLROnPlateau
+
+quantiles: [0.10, 0.50, 0.90]
+
+walkforward:
+  train_days: 210
+  val_days: 30
+  test_days: 30
+  step_days: 30
+
+execution:
+  # Costos para backtest realista (NO uses 0)
+  fee_per_side: 0.001
+  spread_bps: 2
+  slippage_bps_per_side: 2
+
+tuning:
+  n_trials: 40
+  timeout_sec: 0           # 0 = sin timeout
+  # objetivo compuesto (max PF + penaliza DD + penaliza pocos trades)
+  dd_penalty: 1.5
+  min_trades_per_fold: 200
+
+ood:
+  # parámetro a tunear indirectamente: cuantíl para threshold
+  q_low: 0.90
+  q_high: 0.995
+
+sampling:
+  mode: event_stream
+  steps_per_epoch: 2500
+  p_event: 0.75
+  event_params:
+    breakout_lookback: 48
+    ema_span: 96
+    vol_lookback: 96
+    vol_z: 2.0
+    ret_z: 2.5
+    dev_z: 2.0
+    wick_ratio: 0.60
