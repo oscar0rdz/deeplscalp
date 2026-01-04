@@ -15,23 +15,23 @@ from training.itransformer_v71 import ITransformerV71, ITransV71Config, quantile
 
 
 @dataclass
-class StandardScaler:
+class FeatureScaler:
     mean_: np.ndarray
     std_: np.ndarray
 
     def transform2d(self, x2d: np.ndarray) -> np.ndarray:
         return (x2d - self.mean_) / (self.std_ + 1e-12)
 
-    def fit_from2d(self, x2d: np.ndarray) -> "StandardScaler":
+    def fit_from2d(self, x2d: np.ndarray) -> "FeatureScaler":
         self.mean_ = x2d.mean(axis=0)
         self.std_ = x2d.std(axis=0)
         self.std_ = np.maximum(self.std_, 1e-6)
         return self
 
 
-def _make_scaler(train_df: pd.DataFrame, feature_cols: list[str]) -> StandardScaler:
+def _make_scaler(train_df: pd.DataFrame, feature_cols: list[str]) -> FeatureScaler:
     X = train_df[feature_cols].astype("float32").values
-    scaler = StandardScaler(
+    scaler = FeatureScaler(
         mean_=np.zeros(X.shape[1], dtype=np.float32),
         std_=np.ones(X.shape[1], dtype=np.float32),
     )
@@ -203,10 +203,11 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
     ce_evt = torch.nn.CrossEntropyLoss(weight=evt_w, reduction="none")
 
     reg_alpha = float(tcfg.get("reg_alpha", 1.0))
+    lcfg = cfg.get("loss", {})
     cls_alpha_side = float(tcfg.get("cls_alpha_side", 1.0))
     cls_alpha_hit = float(tcfg.get("cls_alpha_hit", 0.8))
-    cls_alpha_regime = float(tcfg.get("cls_alpha_regime", 0.5))
-    cls_alpha_event = float(tcfg.get("cls_alpha_event", 0.5))
+    cls_alpha_regime = float(lcfg.get("cls_alpha_regime", 0.5))
+    cls_alpha_event = float(lcfg.get("cls_alpha_event", 0.5))
 
     event_weight = float(tcfg.get("event_weight", 1.5))
 
@@ -221,7 +222,7 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
 
     # AMP setup
     amp_enabled = bool(tcfg.get("amp", False))
-    scaler = GradScaler(enabled=amp_enabled)
+    amp_scaler = GradScaler(enabled=amp_enabled)
 
     def run_epoch(dl, train: bool, ep: int):
         model.train(train)
@@ -265,11 +266,11 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
 
             if train:
                 # AMP backward pass
-                scaler.scale(loss).backward()
-                scaler.unscale_(opt)
+                amp_scaler.scale(loss).backward()
+                amp_scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                scaler.step(opt)
-                scaler.update()
+                amp_scaler.step(opt)
+                amp_scaler.update()
 
             losses.append(float(loss.detach().cpu().item()))
             seen += int(X.shape[0])
@@ -300,7 +301,14 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
             best_val = va
             bad = 0
             ckpt = out_dir / f"fold_{fold_id}_best.pt"
-            torch.save({"model": model.state_dict(), "scaler_mean": scaler.mean_, "scaler_std": scaler.std_}, ckpt)
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "scaler_mean": scaler.mean_.astype("float32").tolist(),
+                    "scaler_std": scaler.std_.astype("float32").tolist(),
+                },
+                ckpt,
+            )
         else:
             bad += 1
             if bad >= patience:
@@ -308,10 +316,12 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
                 break
 
     ckpt = out_dir / f"fold_{fold_id}_best.pt"
-    obj = torch.load(ckpt, map_location="cpu")
+    obj = torch.load(ckpt, map_location="cpu", weights_only=False)
+
     model.load_state_dict(obj["model"])
-    scaler.mean_ = obj["scaler_mean"]
-    scaler.std_ = obj["scaler_std"]
+    scaler.mean_ = np.asarray(obj["scaler_mean"], dtype=np.float32)
+    scaler.std_  = np.asarray(obj["scaler_std"], dtype=np.float32)
+
     model.to(device).eval()
 
     return model, scaler
