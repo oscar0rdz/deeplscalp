@@ -1,0 +1,50 @@
+walkforward:
+  enabled: true
+  start: null
+  end: null
+  train_days: 270
+  val_days: 45
+  test_days: 30
+  step_days: 30
+  extra_purge_bars: 0
+
+tuning:
+  enabled: true
+  n_trials: 30
+  timeout_sec: 600
+  metric: "pf_x2"
+  min_trades: 30
+  seed: 1337
+
+  # Objetivo robusto (evita PF absurdos)
+  objective:
+    pf_cap: 3.0
+    mdd_target: 0.15
+    mdd_penalty: 2.0
+    trades_target: 60
+    trades_penalty: 1.0
+
+  search_space:
+    p_side_min: [0.55, 0.80]
+    score_q:    [0.80, 0.99]
+    q_width_max:[0.02, 0.20]
+    ev_buffer:  [-0.0003, 0.0010]
+    topk:       [1500, 12000]
+    atr_min:    [0.0, 0.0005]
+    rv_min:     [0.0, 0.0002]
+    rv_max:     [0.0003, 0.0030]
+
+loss:
+  # Reducir multitarea temporalmente (estabiliza)
+  cls_alpha_event: 0.0
+  cls_alpha_regime: 0.0
+
+  # Manejo del desbalance EVENT/REGIME (si tu train_v71 lo soporta)
+  evt_use_class_weights: true
+  evt_weight_power: 0.6
+  evt_weight_clip: 8.0
+  evt_focal_gamma: 2.0
+
+  reg_use_class_weights: true
+  reg_weight_power: 0.3
+  reg_weight_clip: 4.0

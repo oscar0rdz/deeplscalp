@@ -355,6 +355,18 @@ def backtest_from_predictions_v71(
                     dbg["gate_regime"] += 1
                     continue
 
+            # Microestructura: volatilidad mínima/máxima
+            atr_min = float(thresholds.get("atr_min", 0.0))
+            rv_min = float(thresholds.get("rv_min", 0.0))
+            rv_max = float(thresholds.get("rv_max", 1.0))
+
+            if "atr" in df.columns and atr[i] < atr_min:
+                continue
+            if "rv_5m" in df.columns:
+                rv = float(df["rv_5m"].iloc[i])
+                if rv < rv_min or rv > rv_max:
+                    continue
+
             if cooldown != 0:
                 continue
 
