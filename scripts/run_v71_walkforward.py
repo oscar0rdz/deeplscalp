@@ -205,15 +205,25 @@ def main() -> None:
 
     torch.set_num_threads(int(cfg.get("runtime", {}).get("torch_num_threads", 6)))
 
-    # build dataset
-    subprocess.run(["python", "pipeline.py", "--config", args.config, "build"], check=True)
-
+    # build dataset or use prebuilt
     out_dir = Path(cfg.get("project", {}).get("out_dir", "artifacts")).expanduser()
     _ensure_dir(out_dir / "preds")
     _ensure_dir(out_dir / "reports")
     _ensure_dir(out_dir / "models_v71")
 
-    ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_5m_v71.parquet"
+    prebuilt_dir = cfg.get("dataset", {}).get("prebuilt_dir")
+    if prebuilt_dir:
+        prebuilt_path = Path(prebuilt_dir) / f"train_{_norm_pair(pair)}_5m_v71.parquet"
+        if prebuilt_path.exists():
+            ds_path = prebuilt_path
+            print(f"[DATA] Using prebuilt dataset from {ds_path}")
+        else:
+            print(f"[DATA] Prebuilt dir specified but {prebuilt_path} not found; building...")
+            subprocess.run(["python", "pipeline.py", "--config", args.config, "build"], check=True)
+            ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_5m_v71.parquet"
+    else:
+        subprocess.run(["python", "pipeline.py", "--config", args.config, "build"], check=True)
+        ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_5m_v71.parquet"
     df = pd.read_parquet(ds_path)
     df["ds"] = pd.to_datetime(df["ds"], utc=True)
     df = df.sort_values("ds").reset_index(drop=True)

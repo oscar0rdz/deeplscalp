@@ -8,6 +8,9 @@ walkforward:
   step_days: 30
   extra_purge_bars: 0
 
+dataset:
+  prebuilt_dir: /kaggle/input/parquet-v1
+
 tuning:
   enabled: true
   n_trials: 30
