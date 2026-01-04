@@ -185,9 +185,19 @@ def main() -> None:
     ap.add_argument("--config", required=True)
     ap.add_argument("--pair", required=True)
     ap.add_argument("--device", default="cpu", choices=["cpu", "cuda", "auto"])
+    ap.add_argument("--tf", default=None, help="Override timeframe, e.g. 1m, 5m, 15m")
+    ap.add_argument("--max-folds", type=int, default=None, help="Limit folds for quick smoke tests")
     args = ap.parse_args()
 
     cfg = _load_cfg(args.config)
+
+    # Override timeframe if specified
+    if args.tf:
+        if isinstance(cfg.get("data", None), dict):
+            cfg["data"]["tf"] = args.tf
+        else:
+            cfg["tf"] = args.tf
+
     pair = args.pair
     device = cfg.get("device", args.device)
     if device == "auto":
@@ -216,6 +226,8 @@ def main() -> None:
     print(f"[DATA] rows={len(df)} features={len(feature_cols)}")
 
     folds = make_folds(df, cfg)
+    if args.max_folds is not None:
+        folds = folds[: args.max_folds]
     all_fold_metrics = []
 
     for fold in folds:
