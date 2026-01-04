@@ -9,5 +9,6 @@ description = "DeepLScalp research code"
 requires-python = ">=3.10"
 dependencies = []
 
-[tool.setuptools]
-packages = ["deeplscalp"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["deeplscalp*", "training*"]
