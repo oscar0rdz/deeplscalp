@@ -85,7 +85,7 @@ def make_folds(df: pd.DataFrame, cfg: dict):
     val_days = int(w["val_days"])
     test_days = int(w["test_days"])
     step_days = int(w["step_days"])
-    max_folds = int(cfg["data"]["max_folds"])
+    max_folds = int(cfg.get("data", {}).get("max_folds", 24))
 
     ds_min = df["ds"].min()
     ds_max = df["ds"].max()
@@ -191,12 +191,16 @@ def main() -> None:
 
     cfg = _load_cfg(args.config)
 
+    # Ensure data section exists
+    cfg.setdefault("data", {})
+
+    # Override max_folds if specified (CLI dominates)
+    if args.max_folds is not None:
+        cfg["data"]["max_folds"] = int(args.max_folds)
+
     # Override timeframe if specified
     if args.tf:
-        if isinstance(cfg.get("data", None), dict):
-            cfg["data"]["tf"] = args.tf
-        else:
-            cfg["tf"] = args.tf
+        cfg["data"]["tf"] = args.tf
 
     pair = args.pair
     device = cfg.get("device", args.device)

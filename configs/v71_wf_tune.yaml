@@ -10,6 +10,8 @@ walkforward:
 
 dataset:
   prebuilt_dir: /kaggle/input/parquet-v1
+  dataset_dir: artifacts/datasets
+  max_folds: 24
 
 tuning:
   enabled: true
