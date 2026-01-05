@@ -19,6 +19,66 @@ from deeplscalp.modeling.calibration_v71 import fit_temperature_multiclass, appl
 from deeplscalp.backtest.sim_v71 import backtest_from_predictions_v71
 
 
+def ensure_ds_column(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Garantiza que df tenga columna 'ds' en UTC.
+    Soporta: 'ds' como columna, 'ds' como índice, o columnas alternativas (timestamp/date/etc).
+    """
+    df = df.copy()
+
+    # 1) Si ya existe ds como columna
+    if "ds" in df.columns:
+        df["ds"] = pd.to_datetime(df["ds"], utc=True, errors="coerce")
+
+    # 2) Si ds viene como índice (muy común en parquet)
+    elif isinstance(df.index, pd.DatetimeIndex):
+        df["ds"] = pd.to_datetime(df.index, utc=True, errors="coerce")
+
+    # 3) Si viene en otra columna típica
+    else:
+        candidates = ["date", "datetime", "time", "timestamp", "open_time", "close_time"]
+        found = None
+        for c in candidates:
+            if c in df.columns:
+                found = c
+                s = df[c]
+
+                # datetime ya parseado
+                if pd.api.types.is_datetime64_any_dtype(s):
+                    df["ds"] = pd.to_datetime(s, utc=True, errors="coerce")
+
+                # numérico: epoch s/ms
+                elif pd.api.types.is_integer_dtype(s) or pd.api.types.is_float_dtype(s):
+                    s_nonnull = pd.Series(s).dropna()
+                    if len(s_nonnull) == 0:
+                        df["ds"] = pd.NaT
+                    else:
+                        v = float(s_nonnull.iloc[0])
+                        unit = "ms" if v > 1e12 else "s"
+                        df["ds"] = pd.to_datetime(s, unit=unit, utc=True, errors="coerce")
+
+                # string / object
+                else:
+                    df["ds"] = pd.to_datetime(s, utc=True, errors="coerce")
+
+                break
+
+        if "ds" not in df.columns:
+            raise KeyError(
+                "No se encontró columna temporal. Tu parquet debe incluir 'ds' "
+                "o una de: date/datetime/time/timestamp/open_time/close_time, "
+                "o guardar el datetime como índice."
+            )
+
+    # Limpieza: quitar NaT, ordenar
+    bad = int(df["ds"].isna().sum())
+    if bad > 0:
+        df = df[df["ds"].notna()].copy()
+
+    df = df.sort_values("ds")
+    return df
+
+
 def _norm_pair(pair: str) -> str:
     return pair.replace("/", "_").replace(":", "_")
 
@@ -229,7 +289,7 @@ def main() -> None:
         subprocess.run(["python", "pipeline.py", "--config", args.config, "build"], check=True)
         ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_5m_v71.parquet"
     df = pd.read_parquet(ds_path)
-    df["ds"] = pd.to_datetime(df["ds"], utc=True)
+    df = ensure_ds_column(df)
     df = df.sort_values("ds").reset_index(drop=True)
     df = df.set_index("ds")
 
