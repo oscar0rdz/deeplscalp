@@ -4,37 +4,39 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
-import pandas as pd
-import yaml
-import torch
 import optuna
+import pandas as pd
+import torch
+import yaml
 
-from deeplscalp.modeling.train_v71 import train_model_v71, predict_v71
-from deeplscalp.modeling.calibration_v71 import fit_temperature_multiclass, apply_temperature_multiclass
 from deeplscalp.backtest.sim_v71 import backtest_from_predictions_v71
+from deeplscalp.modeling.calibration_v71 import (
+    apply_temperature_multiclass,
+    fit_temperature_multiclass,
+)
+from deeplscalp.modeling.train_v71 import predict_v71, train_model_v71
 
 
 def ensure_ds_column(df: pd.DataFrame) -> pd.DataFrame:
     """
     Garantiza que df tenga columna 'ds' en UTC.
-    Soporta: 'ds' como columna, 'ds' como índice, o columnas alternativas (timestamp/date/etc).
+    Soporta:
+      - 'ds' como columna
+      - 'ds' como índice datetime
+      - columnas alternativas: date/datetime/time/timestamp/open_time/close_time
     """
     df = df.copy()
 
-    # 1) Si ya existe ds como columna
     if "ds" in df.columns:
         df["ds"] = pd.to_datetime(df["ds"], utc=True, errors="coerce")
 
-    # 2) Si ds viene como índice (muy común en parquet)
     elif isinstance(df.index, pd.DatetimeIndex):
         df["ds"] = pd.to_datetime(df.index, utc=True, errors="coerce")
 
-    # 3) Si viene en otra columna típica
     else:
         candidates = ["date", "datetime", "time", "timestamp", "open_time", "close_time"]
         found = None
@@ -42,12 +44,8 @@ def ensure_ds_column(df: pd.DataFrame) -> pd.DataFrame:
             if c in df.columns:
                 found = c
                 s = df[c]
-
-                # datetime ya parseado
                 if pd.api.types.is_datetime64_any_dtype(s):
                     df["ds"] = pd.to_datetime(s, utc=True, errors="coerce")
-
-                # numérico: epoch s/ms
                 elif pd.api.types.is_integer_dtype(s) or pd.api.types.is_float_dtype(s):
                     s_nonnull = pd.Series(s).dropna()
                     if len(s_nonnull) == 0:
@@ -56,26 +54,22 @@ def ensure_ds_column(df: pd.DataFrame) -> pd.DataFrame:
                         v = float(s_nonnull.iloc[0])
                         unit = "ms" if v > 1e12 else "s"
                         df["ds"] = pd.to_datetime(s, unit=unit, utc=True, errors="coerce")
-
-                # string / object
                 else:
                     df["ds"] = pd.to_datetime(s, utc=True, errors="coerce")
-
                 break
 
-        if "ds" not in df.columns:
+        if found is None:
             raise KeyError(
                 "No se encontró columna temporal. Tu parquet debe incluir 'ds' "
                 "o una de: date/datetime/time/timestamp/open_time/close_time, "
                 "o guardar el datetime como índice."
             )
 
-    # Limpieza: quitar NaT, ordenar
     bad = int(df["ds"].isna().sum())
     if bad > 0:
         df = df[df["ds"].notna()].copy()
 
-    df = df.sort_values("ds")
+    df = df.sort_values("ds").reset_index(drop=True)
     return df
 
 
@@ -89,17 +83,17 @@ def _ensure_dir(p: Path) -> None:
 
 def _load_cfg(path: str) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Config inválido o vacío: {path}")
+    return cfg
 
 
-def _align_y_by_pred_index(val_df, pred_df, col: str):
+def _align_y_by_pred_index(val_df: pd.DataFrame, pred_df: pd.DataFrame, col: str) -> np.ndarray:
     """
-    Alinea y (val_df[col]) exactamente a pred_df.index (datetime utc).
+    Alinea val_df[col] exactamente a pred_df.index (datetime utc).
     val_df debe tener columna 'ds' o índice datetime.
     """
-    import pandas as pd
-    import numpy as np
-
     v = val_df.copy()
     if "ds" in v.columns:
         v["ds"] = pd.to_datetime(v["ds"], utc=True)
@@ -112,45 +106,26 @@ def _align_y_by_pred_index(val_df, pred_df, col: str):
     return np.asarray(y, dtype=np.int64)
 
 
-def _make_purged_splits(df: pd.DataFrame, cfg: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    seq_len = int(cfg["features"]["seq_len"])
-    base_h = int(cfg.get("labels", {}).get("base_horizon", 12))
-    max_hold = int(cfg.get("risk", {}).get("max_hold_bars", 16))
-    embargo = int(cfg.get("split", {}).get("embargo_bars", max(base_h, max_hold) + 2))
+def make_folds(df: pd.DataFrame, cfg: dict) -> List[dict]:
+    # Hardening: defaults razonables si faltan claves
+    w = cfg.get("walkforward", {})
+    train_days = int(w.get("train_days", 240))
+    val_days = int(w.get("val_days", 30))
+    test_days = int(w.get("test_days", 30))
+    step_days = int(w.get("step_days", 30))
 
-    train_bars = int(cfg.get("split", {}).get("train_bars", 180000))
-    val_bars = int(cfg.get("split", {}).get("val_bars", 50000))
-    test_bars = int(cfg.get("split", {}).get("test_bars", 80000))
-
-    n = len(df)
-    train_end = min(train_bars, n)
-    val_end = min(train_end + val_bars, n)
-    test_end = min(val_end + test_bars, n)
-
-    train_end_p = max(0, train_end - embargo)
-    val_end_p = max(train_end, val_end - embargo)
-
-    train = df.iloc[:train_end_p].copy()
-    val_start_ctx = max(0, train_end - (seq_len - 1))
-    val = df.iloc[val_start_ctx:val_end_p].copy()
-    test_start_ctx = max(0, val_end - (seq_len - 1))
-    test = df.iloc[test_start_ctx:test_end].copy()
-
-    return train, val, test
-
-
-def make_folds(df: pd.DataFrame, cfg: dict):
-    w = cfg["walkforward"]
-    train_days = int(w["train_days"])
-    val_days = int(w["val_days"])
-    test_days = int(w["test_days"])
-    step_days = int(w["step_days"])
     max_folds = int(cfg.get("data", {}).get("max_folds", 24))
 
-    ds_min = df["ds"].min()
-    ds_max = df["ds"].max()
+    # BUGFIX: usar índice si ya está en datetime; si no, usar columna ds
+    if isinstance(df.index, pd.DatetimeIndex):
+        ds_min = pd.to_datetime(df.index.min(), utc=True)
+        ds_max = pd.to_datetime(df.index.max(), utc=True)
+    else:
+        ds_min = pd.to_datetime(df["ds"].min(), utc=True)
+        ds_max = pd.to_datetime(df["ds"].max(), utc=True)
 
     start = ds_min + pd.Timedelta(days=30)
+
     folds = []
     fid = 0
     while True:
@@ -158,33 +133,37 @@ def make_folds(df: pd.DataFrame, cfg: dict):
         train_end = train_start + pd.Timedelta(days=train_days)
         val_end = train_end + pd.Timedelta(days=val_days)
         test_end = val_end + pd.Timedelta(days=test_days)
+
         if test_end > ds_max:
             break
-        folds.append({
-            "fold_id": fid,
-            "train_start": train_start,
-            "train_end": train_end,
-            "val_end": val_end,
-            "test_end": test_end
-        })
+
+        folds.append(
+            {
+                "fold_id": fid,
+                "train_start": train_start,
+                "train_end": train_end,
+                "val_end": val_end,
+                "test_end": test_end,
+            }
+        )
         fid += 1
         if fid >= max_folds:
             break
+
         start = start + pd.Timedelta(days=step_days)
 
     return folds
 
 
-def _pick(met: dict, keys: list[str], default=0.0):
+def _pick(met: dict, keys: List[str], default=0.0):
     for k in keys:
         if k in met:
             return met[k]
     return default
 
 
-def objective_factory(cfg, pred_val):
-    obj_cfg = cfg["tuning"].get("objective", {})
-
+def objective_factory(cfg: dict, pred_val: pd.DataFrame):
+    obj_cfg = cfg.get("tuning", {}).get("objective", {})
     pf_cap = float(obj_cfg.get("pf_cap", 3.0))
     mdd_target = float(obj_cfg.get("mdd_target", 0.15))
     mdd_penalty = float(obj_cfg.get("mdd_penalty", 2.0))
@@ -192,7 +171,7 @@ def objective_factory(cfg, pred_val):
     tr_penalty = float(obj_cfg.get("trades_penalty", 1.0))
 
     def obj(trial: optuna.Trial):
-        # Hyperparams
+        # Hyperparams (rangos hardcodeados como en tu versión original)
         p_side_min = trial.suggest_float("p_side_min", 0.55, 0.80)
         score_q = trial.suggest_float("score_q", 0.80, 0.99)
         q_width_max = trial.suggest_float("q_width_max", 0.02, 0.20)
@@ -231,13 +210,31 @@ def objective_factory(cfg, pred_val):
         pf_capped = min(pf, pf_cap)
         pen_mdd = mdd_penalty * max(0.0, mdd - mdd_target)
         pen_tr = tr_penalty * max(0, tr_target - ntr) / max(1, tr_target)
-
         obj_score = pf_capped - pen_mdd - pen_tr
 
         print(f"[tuner] pf={pf:.3f} mdd={mdd:.3f} ntr={ntr} obj={obj_score:.3f}")
         return float(obj_score)
 
     return obj
+
+
+def _resolve_tf(args_tf: str | None, cfg: dict) -> str:
+    if args_tf:
+        return str(args_tf)
+    if "tf" in cfg and cfg["tf"]:
+        return str(cfg["tf"])
+    if "data" in cfg and isinstance(cfg["data"], dict) and cfg["data"].get("tf"):
+        return str(cfg["data"]["tf"])
+    if "timeframes" in cfg and isinstance(cfg["timeframes"], dict) and cfg["timeframes"].get("exec_tf"):
+        return str(cfg["timeframes"]["exec_tf"])
+    return "5m"
+
+
+def _resolve_prebuilt_dir(cfg: dict) -> str | None:
+    # Acepta ambas convenciones: dataset.prebuilt_dir (vieja) y data.kaggle_parquet_dir (nueva)
+    d1 = cfg.get("dataset", {}).get("prebuilt_dir")
+    d2 = cfg.get("data", {}).get("kaggle_parquet_dir")
+    return d1 or d2
 
 
 def main() -> None:
@@ -247,61 +244,110 @@ def main() -> None:
     ap.add_argument("--device", default="cpu", choices=["cpu", "cuda", "auto"])
     ap.add_argument("--tf", default=None, help="Override timeframe, e.g. 1m, 5m, 15m")
     ap.add_argument("--max-folds", type=int, default=None, help="Limit folds for quick smoke tests")
+    ap.add_argument(
+        "--no-build",
+        action="store_true",
+        help="Si falta el parquet prebuilt, NO intentes pipeline build; falla con error claro.",
+    )
     args = ap.parse_args()
 
     cfg = _load_cfg(args.config)
-
-    # Ensure data section exists
     cfg.setdefault("data", {})
+    cfg.setdefault("dataset", {})
+    cfg.setdefault("tuning", {})
 
-    # Override max_folds if specified (CLI dominates)
+    # CLI domina
     if args.max_folds is not None:
         cfg["data"]["max_folds"] = int(args.max_folds)
 
-    # Override timeframe if specified
-    if args.tf:
-        cfg["data"]["tf"] = args.tf
+    tf = _resolve_tf(args.tf, cfg)
+    cfg["tf"] = tf
+    cfg["data"]["tf"] = tf
 
     pair = args.pair
+
     device = cfg.get("device", args.device)
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     torch.set_num_threads(int(cfg.get("runtime", {}).get("torch_num_threads", 6)))
 
-    # build dataset or use prebuilt
     out_dir = Path(cfg.get("project", {}).get("out_dir", "artifacts")).expanduser()
     _ensure_dir(out_dir / "preds")
     _ensure_dir(out_dir / "reports")
     _ensure_dir(out_dir / "models_v71")
+    _ensure_dir(out_dir / "datasets")
 
-    prebuilt_dir = cfg.get("dataset", {}).get("prebuilt_dir")
+    # Resolver prebuilt
+    prebuilt_dir = _resolve_prebuilt_dir(cfg)
+    use_prebuilt = bool(cfg.get("data", {}).get("use_prebuilt", False) or prebuilt_dir)
+
+    ds_path: Path
     if prebuilt_dir:
-        prebuilt_path = Path(prebuilt_dir) / f"train_{_norm_pair(pair)}_5m_v71.parquet"
+        prebuilt_path = Path(prebuilt_dir) / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
         if prebuilt_path.exists():
             ds_path = prebuilt_path
             print(f"[DATA] Using prebuilt dataset from {ds_path}")
         else:
-            print(f"[DATA] Prebuilt dir specified but {prebuilt_path} not found; building...")
+            msg = (
+                f"[DATA] Prebuilt dir specified but file not found:\n"
+                f"       expected: {prebuilt_path}\n"
+                f"       pair={pair} tf={tf}\n"
+            )
+            if args.no_build or use_prebuilt:
+                raise FileNotFoundError(msg)
+            print(msg + "       building via pipeline...")
             subprocess.run(["python", "pipeline.py", "--config", args.config, "build"], check=True)
-            ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_5m_v71.parquet"
+            ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
     else:
+        if use_prebuilt and args.no_build:
+            raise ValueError("[DATA] use_prebuilt activo pero no hay directorio de prebuilt configurado.")
+        # comportamiento legacy
         subprocess.run(["python", "pipeline.py", "--config", args.config, "build"], check=True)
-        ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_5m_v71.parquet"
+        ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
+
     df = pd.read_parquet(ds_path)
     df = ensure_ds_column(df)
+
+    # BUGFIX: conservar ds aunque se use como índice
     df = df.sort_values("ds").reset_index(drop=True)
-    df = df.set_index("ds")
+    df = df.set_index("ds", drop=False)
 
     feature_cols = cfg.get("features", {}).get("columns")
     if not feature_cols:
-        feature_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in {"y_side", "yc_long", "yc_short", "yL_reg", "yS_reg", "y_regime", "y_event", "sample_weight", "is_event", "ds", "pair", "timeframe", "open_next", "vol_scale", "atr"}]
+        drop_cols = {
+            "y_side",
+            "yc_long",
+            "yc_short",
+            "yL_reg",
+            "yS_reg",
+            "y_regime",
+            "y_event",
+            "sample_weight",
+            "is_event",
+            "ds",
+            "pair",
+            "timeframe",
+            "open_next",
+            "vol_scale",
+            "atr",
+        }
+        feature_cols = [
+            c
+            for c in df.columns
+            if pd.api.types.is_numeric_dtype(df[c]) and c not in drop_cols
+        ]
 
-    print(f"[DATA] rows={len(df)} features={len(feature_cols)}")
+    print(f"[DATA] rows={len(df)} features={len(feature_cols)} tf={tf}")
 
     folds = make_folds(df, cfg)
     if args.max_folds is not None:
         folds = folds[: args.max_folds]
+
+    if "n_trials" not in cfg.get("tuning", {}):
+        # Hardening: default si te falta en config
+        cfg["tuning"]["n_trials"] = 35
+
     all_fold_metrics = []
 
     for fold in folds:
@@ -311,10 +357,9 @@ def main() -> None:
         val_df = df[(df.index >= fold["train_end"]) & (df.index < fold["val_end"])].copy()
         test_df = df[(df.index >= fold["val_end"]) & (df.index < fold["test_end"])].copy()
 
-        # Train final model
         model, scaler = train_model_v71(
-            train_df.reset_index(),
-            val_df.reset_index(),
+            train_df.reset_index(drop=True),
+            val_df.reset_index(drop=True),
             feature_cols=feature_cols,
             cfg=cfg,
             device=device,
@@ -322,63 +367,84 @@ def main() -> None:
             out_dir=out_dir / "models_v71",
         )
 
-        # Predict VAL
-        pred_val = predict_v71(model, scaler, val_df.reset_index(), feature_cols, cfg, device)
+        pred_val = predict_v71(
+            model, scaler, val_df.reset_index(drop=True), feature_cols, cfg, device
+        )
 
         # Calibración
         t_grid = np.linspace(0.5, 5.0, 19)
 
         # SIDE
-        P_side = pred_val[["p_flat","p_long","p_short"]].values
+        P_side = pred_val[["p_flat", "p_long", "p_short"]].values
         y_side = _align_y_by_pred_index(val_df, pred_val, "y_side")
         T_side, nll_side = fit_temperature_multiclass(P_side, y_side, t_grid)
-        pred_val.loc[:, ["p_flat","p_long","p_short"]] = apply_temperature_multiclass(P_side, T_side)
+        pred_val.loc[:, ["p_flat", "p_long", "p_short"]] = apply_temperature_multiclass(P_side, T_side)
         print(f"[CAL] side T={T_side:.3f} nll={nll_side:.6f}")
 
-        # REGIME
-        P_reg = pred_val[["p_reg_range","p_reg_up","p_reg_dn","p_reg_spike"]].values
-        y_reg = _align_y_by_pred_index(val_df, pred_val, "y_regime")
-        T_reg, nll_reg = fit_temperature_multiclass(P_reg, y_reg, t_grid)
-        pred_val.loc[:, ["p_reg_range","p_reg_up","p_reg_dn","p_reg_spike"]] = apply_temperature_multiclass(P_reg, T_reg)
-        print(f"[CAL] regime T={T_reg:.3f} nll={nll_reg:.6f}")
+        # REGIME (solo si existe y_regime)
+        T_reg = 1.0
+        if "y_regime" in val_df.columns:
+            P_reg = pred_val[["p_reg_range", "p_reg_up", "p_reg_dn", "p_reg_spike"]].values
+            y_reg = _align_y_by_pred_index(val_df, pred_val, "y_regime")
+            T_reg, nll_reg = fit_temperature_multiclass(P_reg, y_reg, t_grid)
+            pred_val.loc[:, ["p_reg_range", "p_reg_up", "p_reg_dn", "p_reg_spike"]] = apply_temperature_multiclass(
+                P_reg, T_reg
+            )
+            print(f"[CAL] regime T={T_reg:.3f} nll={nll_reg:.6f}")
+        else:
+            print("[CAL] regime: y_regime no existe; se omite calibración (T=1.0).")
 
-        # EVENT
-        P_evt = pred_val[["p_evt_none","p_evt_breakout","p_evt_rebound","p_evt_spike"]].values
-        y_evt = _align_y_by_pred_index(val_df, pred_val, "y_event")
-        T_evt, nll_evt = fit_temperature_multiclass(P_evt, y_evt, t_grid)
-        pred_val.loc[:, ["p_evt_none","p_evt_breakout","p_evt_rebound","p_evt_spike"]] = apply_temperature_multiclass(P_evt, T_evt)
-        print(f"[CAL] event T={T_evt:.3f} nll={nll_evt:.6f}")
+        # EVENT (solo si existe y_event)
+        T_evt = 1.0
+        if "y_event" in val_df.columns:
+            P_evt = pred_val[["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"]].values
+            y_evt = _align_y_by_pred_index(val_df, pred_val, "y_event")
+            T_evt, nll_evt = fit_temperature_multiclass(P_evt, y_evt, t_grid)
+            pred_val.loc[:, ["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"]] = apply_temperature_multiclass(
+                P_evt, T_evt
+            )
+            print(f"[CAL] event T={T_evt:.3f} nll={nll_evt:.6f}")
+        else:
+            print("[CAL] event: y_event no existe; se omite calibración (T=1.0).")
 
         # Tuning
         obj = objective_factory(cfg, pred_val)
         study = optuna.create_study(direction="maximize")
         study.optimize(obj, n_trials=int(cfg["tuning"]["n_trials"]))
-
         best_thresholds = study.best_params
 
         # Predict TEST
-        pred_test = predict_v71(model, scaler, test_df.reset_index(), feature_cols, cfg, device)
+        pred_test = predict_v71(
+            model, scaler, test_df.reset_index(drop=True), feature_cols, cfg, device
+        )
 
         # Aplicar calibración a test
-        pred_test.loc[:, ["p_flat","p_long","p_short"]] = apply_temperature_multiclass(pred_test[["p_flat","p_long","p_short"]].values, T_side)
-        pred_test.loc[:, ["p_reg_range","p_reg_up","p_reg_dn","p_reg_spike"]] = apply_temperature_multiclass(pred_test[["p_reg_range","p_reg_up","p_reg_dn","p_reg_spike"]].values, T_reg)
-        pred_test.loc[:, ["p_evt_none","p_evt_breakout","p_evt_rebound","p_evt_spike"]] = apply_temperature_multiclass(pred_test[["p_evt_none","p_evt_breakout","p_evt_rebound","p_evt_spike"]].values, T_evt)
+        pred_test.loc[:, ["p_flat", "p_long", "p_short"]] = apply_temperature_multiclass(
+            pred_test[["p_flat", "p_long", "p_short"]].values, T_side
+        )
+        if T_reg != 1.0:
+            pred_test.loc[:, ["p_reg_range", "p_reg_up", "p_reg_dn", "p_reg_spike"]] = apply_temperature_multiclass(
+                pred_test[["p_reg_range", "p_reg_up", "p_reg_dn", "p_reg_spike"]].values, T_reg
+            )
+        if T_evt != 1.0:
+            pred_test.loc[:, ["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"]] = apply_temperature_multiclass(
+                pred_test[["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"]].values, T_evt
+            )
 
-        # Backtest
-        met, diag = backtest_from_predictions_v71(pred_test, cfg, best_thresholds)
+        met, _diag = backtest_from_predictions_v71(pred_test, cfg, best_thresholds)
 
-        # Save
         fold_dir = out_dir / "reports" / f"fold_{fold['fold_id']}"
-        fold_dir.mkdir(exist_ok=True)
+        _ensure_dir(fold_dir)
         pred_test.to_parquet(fold_dir / "pred_test.parquet")
-        with open(fold_dir / "metrics_test.json", "w") as f:
+
+        with open(fold_dir / "metrics_test.json", "w", encoding="utf-8") as f:
             json.dump(met, f, indent=2)
 
         all_fold_metrics.append({"fold": fold["fold_id"], **met})
 
-    # Summary
     sm = pd.DataFrame(all_fold_metrics)
     sm.to_csv(out_dir / "reports" / "walkforward_summary.csv", index=False)
+    print(f"[OK] wrote {out_dir / 'reports' / 'walkforward_summary.csv'}")
 
 
 if __name__ == "__main__":

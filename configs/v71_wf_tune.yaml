@@ -32,9 +32,9 @@ tuning:
   search_space:
     p_side_min: [0.55, 0.80]
     score_q:    [0.80, 0.99]
-    q_width_max:[0.02, 0.20]
+    q_width_max: [0.02, 0.20]
     ev_buffer:  [-0.0003, 0.0010]
-    topk:       [1500, 12000]
+    top_k:      [1500, 12000]
     atr_min:    [0.0, 0.0005]
     rv_min:     [0.0, 0.0002]
     rv_max:     [0.0003, 0.0030]
