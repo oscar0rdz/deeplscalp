@@ -10,13 +10,39 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-# AMP compatibility patch
+# --- AMP compatibility (torch.amp vs torch.cuda.amp) ---
+AMP_API = "unknown"
 try:
-    from torch.amp import autocast, GradScaler
-    _AMP_NEW = True
+    from torch.amp import autocast as _autocast
+    from torch.amp import GradScaler as _GradScaler
+    AMP_API = "torch.amp"
 except Exception:
-    from torch.cuda.amp import autocast, GradScaler
-    _AMP_NEW = False
+    from torch.cuda.amp import autocast as _autocast
+    from torch.cuda.amp import GradScaler as _GradScaler
+    AMP_API = "torch.cuda.amp"
+
+
+def autocast_ctx(device_type: str, enabled: bool):
+    """
+    torch.amp.autocast requires device_type.
+    torch.cuda.amp.autocast does NOT.
+    This wrapper supports both.
+    """
+    try:
+        return _autocast(device_type=device_type, enabled=enabled)
+    except TypeError:
+        return _autocast(enabled=enabled)
+
+
+def make_grad_scaler(device_type: str, enabled: bool):
+    """
+    torch.amp.GradScaler accepts device_type.
+    torch.cuda.amp.GradScaler does NOT.
+    """
+    try:
+        return _GradScaler(device_type=device_type, enabled=enabled)
+    except TypeError:
+        return _GradScaler(enabled=enabled)
 
 from training.itransformer_v71 import ITransformerV71, ITransV71Config, quantile_loss
 
@@ -229,10 +255,8 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
 
     # AMP setup
     amp_enabled = bool(tcfg.get("amp", False))
-    if _AMP_NEW:
-        amp_scaler = GradScaler('cuda', enabled=amp_enabled)
-    else:
-        amp_scaler = GradScaler(enabled=amp_enabled)
+    device_type = "cuda" if device.type == "cuda" else "cpu"
+    amp_scaler = make_grad_scaler(device_type=device_type, enabled=amp_enabled)
 
     def run_epoch(dl, train: bool, ep: int):
         model.train(train)
@@ -258,7 +282,7 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
                 opt.zero_grad(set_to_none=True)
 
             # AMP forward pass
-            with autocast(enabled=amp_enabled):
+            with autocast_ctx(device_type=device_type, enabled=amp_enabled):
                 side_logits, hitL_logits, hitS_logits, qL, qS, reg_logits, evt_logits, emb = model(X)
 
                 w = sw * (1.0 + event_weight * is_evt)
@@ -440,4 +464,5 @@ def predict_v71(model, scaler, df: pd.DataFrame, feature_cols: list[str], cfg: d
 
     # set datetime index
     out.index = pd.to_datetime(df.loc[idx, "ds"], utc=True)
+    return out.sort_index()
     return out.sort_index()
