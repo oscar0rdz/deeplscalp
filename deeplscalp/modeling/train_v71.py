@@ -9,7 +9,14 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast, GradScaler
+
+# AMP compatibility patch
+try:
+    from torch.amp import autocast, GradScaler
+    _AMP_NEW = True
+except Exception:
+    from torch.cuda.amp import autocast, GradScaler
+    _AMP_NEW = False
 
 from training.itransformer_v71 import ITransformerV71, ITransV71Config, quantile_loss
 
@@ -222,7 +229,10 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
 
     # AMP setup
     amp_enabled = bool(tcfg.get("amp", False))
-    amp_scaler = GradScaler(enabled=amp_enabled)
+    if _AMP_NEW:
+        amp_scaler = GradScaler('cuda', enabled=amp_enabled)
+    else:
+        amp_scaler = GradScaler(enabled=amp_enabled)
 
     def run_epoch(dl, train: bool, ep: int):
         model.train(train)

@@ -13,6 +13,13 @@ import pandas as pd
 import torch
 import yaml
 
+PROB_DTYPE = np.float32
+
+
+def assign_probs(df, cols, arr):
+    arr = np.asarray(arr, dtype=PROB_DTYPE)
+    df.loc[:, cols] = arr
+
 from deeplscalp.backtest.sim_v71 import backtest_from_predictions_v71
 from deeplscalp.modeling.calibration_v71 import (
     apply_temperature_multiclass,
@@ -169,6 +176,8 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
     mdd_penalty = float(obj_cfg.get("mdd_penalty", 2.0))
     tr_target = int(obj_cfg.get("trades_target", 60))
     tr_penalty = float(obj_cfg.get("trades_penalty", 1.0))
+    tr_max = int(obj_cfg.get("trades_max", 250))
+    overtrade_penalty = float(obj_cfg.get("overtrade_penalty", 1.0))
 
     def obj(trial: optuna.Trial):
         # Hyperparams (rangos hardcodeados como en tu versión original)
@@ -210,7 +219,8 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
         pf_capped = min(pf, pf_cap)
         pen_mdd = mdd_penalty * max(0.0, mdd - mdd_target)
         pen_tr = tr_penalty * max(0, tr_target - ntr) / max(1, tr_target)
-        obj_score = pf_capped - pen_mdd - pen_tr
+        pen_overtrade = overtrade_penalty * max(0, ntr - tr_max) / max(1, tr_max)
+        obj_score = pf_capped - pen_mdd - pen_tr - pen_overtrade
 
         print(f"[tuner] pf={pf:.3f} mdd={mdd:.3f} ntr={ntr} obj={obj_score:.3f}")
         return float(obj_score)
@@ -338,6 +348,13 @@ def main() -> None:
             if pd.api.types.is_numeric_dtype(df[c]) and c not in drop_cols
         ]
 
+        # Leakage guard: remove potentially leaky features
+        LEAKY_TOKENS = ("next", "lead", "future", "fwd", "target", "label")
+        leaky = [c for c in feature_cols if any(t in c.lower() for t in LEAKY_TOKENS)]
+        if leaky:
+            print(f"[WARN] Removing {len(leaky)} potentially-leaky feature columns. Examples: {leaky[:15]}")
+            feature_cols = [c for c in feature_cols if c not in leaky]
+
     print(f"[DATA] rows={len(df)} features={len(feature_cols)} tf={tf}")
 
     folds = make_folds(df, cfg)
@@ -378,7 +395,7 @@ def main() -> None:
         P_side = pred_val[["p_flat", "p_long", "p_short"]].values
         y_side = _align_y_by_pred_index(val_df, pred_val, "y_side")
         T_side, nll_side = fit_temperature_multiclass(P_side, y_side, t_grid)
-        pred_val.loc[:, ["p_flat", "p_long", "p_short"]] = apply_temperature_multiclass(P_side, T_side)
+        assign_probs(pred_val, ["p_flat", "p_long", "p_short"], apply_temperature_multiclass(P_side, T_side))
         print(f"[CAL] side T={T_side:.3f} nll={nll_side:.6f}")
 
         # REGIME (solo si existe y_regime)
@@ -387,9 +404,9 @@ def main() -> None:
             P_reg = pred_val[["p_reg_range", "p_reg_up", "p_reg_dn", "p_reg_spike"]].values
             y_reg = _align_y_by_pred_index(val_df, pred_val, "y_regime")
             T_reg, nll_reg = fit_temperature_multiclass(P_reg, y_reg, t_grid)
-            pred_val.loc[:, ["p_reg_range", "p_reg_up", "p_reg_dn", "p_reg_spike"]] = apply_temperature_multiclass(
+            assign_probs(pred_val, ["p_reg_range", "p_reg_up", "p_reg_dn", "p_reg_spike"], apply_temperature_multiclass(
                 P_reg, T_reg
-            )
+            ))
             print(f"[CAL] regime T={T_reg:.3f} nll={nll_reg:.6f}")
         else:
             print("[CAL] regime: y_regime no existe; se omite calibración (T=1.0).")
@@ -400,9 +417,9 @@ def main() -> None:
             P_evt = pred_val[["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"]].values
             y_evt = _align_y_by_pred_index(val_df, pred_val, "y_event")
             T_evt, nll_evt = fit_temperature_multiclass(P_evt, y_evt, t_grid)
-            pred_val.loc[:, ["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"]] = apply_temperature_multiclass(
+            assign_probs(pred_val, ["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"], apply_temperature_multiclass(
                 P_evt, T_evt
-            )
+            ))
             print(f"[CAL] event T={T_evt:.3f} nll={nll_evt:.6f}")
         else:
             print("[CAL] event: y_event no existe; se omite calibración (T=1.0).")
@@ -419,17 +436,17 @@ def main() -> None:
         )
 
         # Aplicar calibración a test
-        pred_test.loc[:, ["p_flat", "p_long", "p_short"]] = apply_temperature_multiclass(
+        assign_probs(pred_test, ["p_flat", "p_long", "p_short"], apply_temperature_multiclass(
             pred_test[["p_flat", "p_long", "p_short"]].values, T_side
-        )
+        ))
         if T_reg != 1.0:
-            pred_test.loc[:, ["p_reg_range", "p_reg_up", "p_reg_dn", "p_reg_spike"]] = apply_temperature_multiclass(
+            assign_probs(pred_test, ["p_reg_range", "p_reg_up", "p_reg_dn", "p_reg_spike"], apply_temperature_multiclass(
                 pred_test[["p_reg_range", "p_reg_up", "p_reg_dn", "p_reg_spike"]].values, T_reg
-            )
+            ))
         if T_evt != 1.0:
-            pred_test.loc[:, ["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"]] = apply_temperature_multiclass(
+            assign_probs(pred_test, ["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"], apply_temperature_multiclass(
                 pred_test[["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"]].values, T_evt
-            )
+            ))
 
         met, _diag = backtest_from_predictions_v71(pred_test, cfg, best_thresholds)
 

@@ -66,8 +66,12 @@ def _profit_factor(r: np.ndarray) -> float:
     pos = r[r > 0].sum()
     neg = r[r < 0].sum()
     if neg == 0:
-        return float("inf") if pos > 0 else 0.0
-    return float(pos / abs(neg))
+        return 1e6 if pos > 0 else 0.0
+    neg = max(float(abs(neg)), EPS)
+    pf = float(pos) / neg
+    if not np.isfinite(pf):
+        pf = 1e6
+    return pf
 
 
 def _max_drawdown(equity: np.ndarray) -> float:
