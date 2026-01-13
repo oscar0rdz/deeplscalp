@@ -1,0 +1,110 @@
+project:
+  out_dir: artifacts
+  workers: 1
+
+# En Kaggle NO vamos a pipeline build; esto queda solo como "legacy".
+freqtrade:
+  datadir: data/freqtrade
+
+universe:
+  pairs:
+    - XRP/USDT
+  anchor_pair: BTC/USDT
+
+timeframes:
+  exec_tf: 5m
+  informative_tfs: [15m, 1h, 4h]
+  timeframes_to_download: []   # Kaggle: no downloads
+
+labels:
+  base_horizon: 18
+  atr_period: 14
+
+features:
+  seq_len: 192
+
+train:
+  batch_size: 512
+  lr: 0.0002
+  wd: 0.0001
+  epochs: 20
+  early_stop_patience: 8
+  min_rel_improve: 0.005
+  grad_clip: 2.0
+  log_every_steps: 100
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  amp: true
+
+model:
+  d_model: 160
+  nhead: 8
+  num_layers: 3
+  dropout: 0.1
+  quantiles: [0.1, 0.5, 0.9]
+  norm_first: true
+
+risk:
+  leverage: 3.0
+  risk_fraction: 0.25
+  max_hold_bars: 16
+  tp_atr_mult: 1.6
+  sl_atr_mult: 1.1
+  fee_rate: 0.0004
+  slippage: 0.0002
+
+backtest:
+  thr_lookback_bars: 4000
+  score_q: 0.7
+  ood_q: 0.9
+  ev_q: 0.75
+  p_side_min: 0.52
+  p_tp_min: 0.2
+  p_sl_max: 0.45
+  ev_abs_min: 0.0
+  ev_buffer_mult: 1.0
+  q_width_mult: 2.5
+  use_topk: true
+  top_k: 10
+  cooldown_bars: 1
+
+device: cuda
+cpu_threads: 2
+tf: 5m
+
+# --- CLAVE PARA KAGGLE ---
+dataset:
+  prebuilt_dir: /kaggle/input/parquet-v1
+
+data:
+  use_prebuilt: true
+  kaggle_parquet_dir: /kaggle/input/parquet-v1
+  max_folds: 24
+
+walkforward:
+  train_days: 240
+  val_days: 30
+  test_days: 30
+  step_days: 30
+
+tuning:
+  n_trials: 35
+  pf_cap: 20.0
+  ntr_min: 150
+  lam_mdd: 2.0
+  beta_ntr: 0.002
+  gamma_zero_loss: 0.25
+  objective:
+    pf_cap: 10.0
+    mdd_target: 0.15
+    mdd_penalty: 2.0
+    trades_target: 150
+    trades_penalty: 1.0
+    trades_max: 250
+    overtrade_penalty: 1.0
+
+sim:
+  fee_bps: 4
+  slippage_bps: 2

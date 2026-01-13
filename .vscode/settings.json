@@ -1,4 +1,7 @@
 {
-    "geminicodeassist.enableTelemetry": false,
-    "CodeGPT.apiKey": "Google AI Studio"
+  "python.analysis.typeCheckingMode": "basic",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit"
+  }
 }

@@ -1,8 +1,31 @@
 import heapq
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass
 
 EPS = 1e-12
+
+# Caps realistas para evitar que Optuna se "escape" con gross_loss≈0
+PF_EPS = 1e-8
+DEFAULT_PF_CAP = 20.0
+
+@dataclass(frozen=True)
+class ProfitFactorStats:
+    gross_profit: float
+    gross_loss: float
+    pf: float
+    zero_loss: bool
+
+def profit_factor_stats(r: np.ndarray, pf_cap: float = DEFAULT_PF_CAP) -> ProfitFactorStats:
+    r = np.asarray(r, dtype=np.float64)
+    pos = float(r[r > 0].sum())
+    neg = float(abs(r[r < 0].sum()))
+    zero_loss = bool(neg < PF_EPS)
+    if zero_loss:
+        pf = float(pf_cap if pos > 0 else 0.0)
+    else:
+        pf = float(min(pf_cap, pos / max(neg, PF_EPS)))
+    return ProfitFactorStats(gross_profit=pos, gross_loss=neg, pf=pf, zero_loss=zero_loss)
 
 
 def _round_trip_cost_rt(cfg: dict, cost_mult: float = 1.0) -> float:
@@ -62,16 +85,9 @@ def topk_streaming_by_day(index: pd.DatetimeIndex, score: np.ndarray, top_k: int
 
 
 def _profit_factor(r: np.ndarray) -> float:
-    r = np.asarray(r, dtype=np.float64)
-    pos = r[r > 0].sum()
-    neg = r[r < 0].sum()
-    if neg == 0:
-        return 1e6 if pos > 0 else 0.0
-    neg = max(float(abs(neg)), EPS)
-    pf = float(pos) / neg
-    if not np.isfinite(pf):
-        pf = 1e6
-    return pf
+    # Mantén esta función si otras partes la usan, pero ahora es robusta y finita.
+    s = profit_factor_stats(r)
+    return float(s.pf)
 
 
 def _max_drawdown(equity: np.ndarray) -> float:

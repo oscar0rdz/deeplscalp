@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from contextlib import contextmanager
 import os
 import time
 import json
@@ -9,6 +10,41 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
+
+# ---------- AMP / device robusto (Kaggle Py3.12 + torch nuevo) ----------
+@contextmanager
+def autocast_ctx(device_type: str, enabled: bool = True, dtype=None):
+    """
+    torch>=2: torch.amp.autocast(device_type=...)
+    fallback: torch.cuda.amp.autocast para versiones viejas
+    """
+    if not enabled:
+        yield None
+        return
+    device_type = "cuda" if device_type == "cuda" else "cpu"
+    try:
+        import torch.amp
+        with torch.amp.autocast(device_type=device_type, enabled=True, dtype=dtype):
+            yield None
+    except Exception:
+        if device_type == "cuda":
+            from torch.cuda.amp import autocast
+            with autocast(enabled=True, dtype=dtype):
+                yield None
+        else:
+            # CPU autocast no siempre existe en versiones viejas
+            yield None
+
+def make_grad_scaler(device_type: str, enabled: bool = True):
+    device_type = "cuda" if device_type == "cuda" else "cpu"
+    if not enabled or device_type != "cuda":
+        return None
+    try:
+        from torch.amp import GradScaler
+        return GradScaler("cuda")
+    except Exception:
+        from torch.cuda.amp import GradScaler
+        return GradScaler()
 
 # --- AMP compatibility (torch.amp vs torch.cuda.amp) ---
 AMP_API = "unknown"
@@ -20,29 +56,6 @@ except Exception:
     from torch.cuda.amp import autocast as _autocast
     from torch.cuda.amp import GradScaler as _GradScaler
     AMP_API = "torch.cuda.amp"
-
-
-def autocast_ctx(device_type: str, enabled: bool):
-    """
-    torch.amp.autocast requires device_type.
-    torch.cuda.amp.autocast does NOT.
-    This wrapper supports both.
-    """
-    try:
-        return _autocast(device_type=device_type, enabled=enabled)
-    except TypeError:
-        return _autocast(enabled=enabled)
-
-
-def make_grad_scaler(device_type: str, enabled: bool):
-    """
-    torch.amp.GradScaler accepts device_type.
-    torch.cuda.amp.GradScaler does NOT.
-    """
-    try:
-        return _GradScaler(device_type=device_type, enabled=enabled)
-    except TypeError:
-        return _GradScaler(enabled=enabled)
 
 from training.itransformer_v71 import ITransformerV71, ITransV71Config, quantile_loss
 
@@ -263,6 +276,69 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
     device_type = "cuda" if device.type == "cuda" else "cpu"
     amp_scaler = make_grad_scaler(device_type=device_type, enabled=amp_enabled)
 
+    def compute_sample_weights(sw, is_evt, event_weight):
+        w = sw * (1.0 + event_weight * is_evt)
+        # clamp evita explosión; normalizar por media estabiliza escala
+        w = torch.clamp(w, 0.1, 10.0)
+        m = torch.mean(w)
+        if torch.isfinite(m) and m > 0:
+            w = w / m
+        return w
+
+    def early_stop(val_loss, best_val, bad_epochs, cfg):
+        min_rel_improve = float(getattr(cfg.train, "min_rel_improve", 0.005))
+        improved = val_loss < best_val * (1.0 - min_rel_improve)
+        if improved:
+            best_val = val_loss
+            bad_epochs = 0
+        else:
+            bad_epochs += 1
+        return bad_epochs >= int(cfg.train.patience), best_val, bad_epochs
+
+    def train_step(X, y_side, ycL, ycS, yL, yS, y_reg, y_evt, sw, is_evt):
+        opt.zero_grad(set_to_none=True)
+
+        # AMP forward pass
+        with autocast_ctx(device_type=device_type, enabled=amp_enabled):
+            side_logits, hitL_logits, hitS_logits, qL, qS, reg_logits, evt_logits, emb = model(X)
+
+            w = compute_sample_weights(sw, is_evt, event_weight)
+
+            lqL = quantile_loss(qL, yL, quantiles, reduction="none")
+            lqS = quantile_loss(qS, yS, quantiles, reduction="none")
+            l_reg = (0.5 * (lqL + lqS) * w).mean()
+
+            l_side = (ce_side(side_logits, y_side) * w).mean()
+            l_hit = (0.5 * (ce_hit(hitL_logits, ycL) + ce_hit(hitS_logits, ycS)) * w).mean()
+            l_regime = (ce_reg(reg_logits, y_reg) * w).mean()
+            l_event = (ce_evt(evt_logits, y_evt) * w).mean()
+
+            loss = reg_alpha * l_reg + cls_alpha_side * l_side + cls_alpha_hit * l_hit + cls_alpha_regime * l_regime + cls_alpha_event * l_event
+
+        # AMP backward pass
+        if amp_scaler is None:
+            loss.backward()
+        else:
+            amp_scaler.scale(loss).backward()
+
+        # grad clip real (no solo declarado en YAML)
+        grad_clip_val = float(getattr(tcfg, "grad_clip", 0.0) or 0.0)
+        if grad_clip_val > 0:
+            if amp_scaler is None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_val)
+            else:
+                amp_scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_val)
+
+        # optimizer step
+        if amp_scaler is None:
+            opt.step()
+        else:
+            amp_scaler.step(opt)
+            amp_scaler.update()
+
+        return loss
+
     def run_epoch(dl, train: bool, ep: int):
         model.train(train)
         losses = []
@@ -284,32 +360,24 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
             is_evt = is_evt.to(device)
 
             if train:
-                opt.zero_grad(set_to_none=True)
+                loss = train_step(X, y_side, ycL, ycS, yL, yS, y_reg, y_evt, sw, is_evt)
+            else:
+                with torch.inference_mode():
+                    with autocast_ctx(device_type=device_type, enabled=amp_enabled):
+                        side_logits, hitL_logits, hitS_logits, qL, qS, reg_logits, evt_logits, emb = model(X)
 
-            # AMP forward pass
-            with autocast_ctx(device_type=device_type, enabled=amp_enabled):
-                side_logits, hitL_logits, hitS_logits, qL, qS, reg_logits, evt_logits, emb = model(X)
+                        w = compute_sample_weights(sw, is_evt, event_weight)
 
-                w = sw * (1.0 + event_weight * is_evt)
+                        lqL = quantile_loss(qL, yL, quantiles, reduction="none")
+                        lqS = quantile_loss(qS, yS, quantiles, reduction="none")
+                        l_reg = (0.5 * (lqL + lqS) * w).mean()
 
-                lqL = quantile_loss(qL, yL, quantiles, reduction="none")
-                lqS = quantile_loss(qS, yS, quantiles, reduction="none")
-                l_reg = (0.5 * (lqL + lqS) * w).mean()
+                        l_side = (ce_side(side_logits, y_side) * w).mean()
+                        l_hit = (0.5 * (ce_hit(hitL_logits, ycL) + ce_hit(hitS_logits, ycS)) * w).mean()
+                        l_regime = (ce_reg(reg_logits, y_reg) * w).mean()
+                        l_event = (ce_evt(evt_logits, y_evt) * w).mean()
 
-                l_side = (ce_side(side_logits, y_side) * w).mean()
-                l_hit = (0.5 * (ce_hit(hitL_logits, ycL) + ce_hit(hitS_logits, ycS)) * w).mean()
-                l_regime = (ce_reg(reg_logits, y_reg) * w).mean()
-                l_event = (ce_evt(evt_logits, y_evt) * w).mean()
-
-                loss = reg_alpha * l_reg + cls_alpha_side * l_side + cls_alpha_hit * l_hit + cls_alpha_regime * l_regime + cls_alpha_event * l_event
-
-            if train:
-                # AMP backward pass
-                amp_scaler.scale(loss).backward()
-                amp_scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                amp_scaler.step(opt)
-                amp_scaler.update()
+                        loss = reg_alpha * l_reg + cls_alpha_side * l_side + cls_alpha_hit * l_hit + cls_alpha_regime * l_regime + cls_alpha_event * l_event
 
             losses.append(float(loss.detach().cpu().item()))
             seen += int(X.shape[0])

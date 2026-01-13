@@ -81,12 +81,13 @@ def _maybe_generate_kaggle_cfg(path: Path):
     path.write_text(yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False), encoding="utf-8")
     print(f"[CONFIG] Auto-generated {path} from {base_path}")
 
-from deeplscalp.backtest.sim_v71 import backtest_from_predictions_v71
+from deeplscalp.backtest.sim_v71 import backtest_from_predictions_v71, profit_factor_stats
 from deeplscalp.modeling.calibration_v71 import (
     apply_temperature_multiclass,
     fit_temperature_multiclass,
 )
 from deeplscalp.modeling.train_v71 import predict_v71, train_model_v71
+from deeplscalp.tuning.objective_v71 import robust_objective
 
 
 def ensure_ds_column(df: pd.DataFrame) -> pd.DataFrame:
@@ -283,13 +284,23 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
         mdd = float(_pick(met, ["mdd_x2", "max_drawdown_x2", "max_drawdown"], 0.0))
         ntr = int(_pick(met, ["ntr_x2", "n_trades_x2", "n_trades"], 0))
 
-        pf_capped = min(pf, pf_cap)
-        pen_mdd = mdd_penalty * max(0.0, mdd - mdd_target)
-        pen_tr = tr_penalty * max(0, tr_target - ntr) / max(1, tr_target)
-        pen_overtrade = overtrade_penalty * max(0, ntr - tr_max) / max(1, tr_max)
-        obj_score = pf_capped - pen_mdd - pen_tr - pen_overtrade
+        # Usar objetivo robusto que previene autoengaño
+        s = profit_factor_stats(np.array([1.0, pf, -1.0]), pf_cap)  # Dummy array para calcular stats
+        zero_loss = s.zero_loss
 
-        print(f"[tuner] pf={pf:.3f} mdd={mdd:.3f} ntr={ntr} obj={obj_score:.3f}")
+        obj_score = robust_objective(
+            pf=pf,
+            mdd=mdd,
+            ntr=ntr,
+            zero_loss=zero_loss,
+            pf_cap=pf_cap,
+            ntr_min=int(obj_cfg.get("ntr_min", 150)),
+            lam_mdd=mdd_penalty,
+            beta_ntr=tr_penalty,
+            gamma_zero_loss=overtrade_penalty,
+        )
+
+        print(f"[tuner] pf={pf:.3f} mdd={mdd:.3f} ntr={ntr} zero_loss={zero_loss} obj={obj_score:.3f}")
         return float(obj_score)
 
     return obj
