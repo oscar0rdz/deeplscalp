@@ -20,6 +20,67 @@ def assign_probs(df, cols, arr):
     arr = np.asarray(arr, dtype=PROB_DTYPE)
     df.loc[:, cols] = arr
 
+
+def _deep_merge(a, b):
+    """Deep merge two dictionaries."""
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return b
+    out = dict(a)
+    for k, v in b.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _maybe_generate_kaggle_cfg(path: Path):
+    """Auto-generate _kaggle_v71_wf_tune.yaml from v71_gpu_kaggle.yaml if missing."""
+    # Solo para el caso esperado
+    if path.name != "_kaggle_v71_wf_tune.yaml":
+        return
+
+    base_path = Path("configs/v71_gpu_kaggle.yaml")
+    if not base_path.exists():
+        raise FileNotFoundError(
+            f"No existe {path} y tampoco {base_path}. "
+            "Genera el config o agrega v71_gpu_kaggle.yaml al repo."
+        )
+
+    base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
+
+    overlay = {
+        "tf": "5m",
+        "data": {
+            "use_prebuilt": True,
+            "kaggle_parquet_dir": "/kaggle/input/parquet-v1",
+            "max_folds": 24,
+        },
+        "labels": {"loss_w_regime": 0.0, "loss_w_event": 0.0},
+        "walkforward": {
+            "train_days": 240,
+            "val_days": 30,
+            "test_days": 30,
+            "step_days": 30,
+        },
+        "tuning": {
+            "n_trials": 35,
+            "objective": {
+                "pf_cap": 10.0,
+                "mdd_target": 0.15,
+                "mdd_penalty": 2.0,
+                "trades_target": 150,
+                "trades_penalty": 1.0,
+                "trades_max": 250,
+                "overtrade_penalty": 1.0,
+            },
+        },
+    }
+
+    cfg = _deep_merge(base, overlay)
+    path.write_text(yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False), encoding="utf-8")
+    print(f"[CONFIG] Auto-generated {path} from {base_path}")
+
 from deeplscalp.backtest.sim_v71 import backtest_from_predictions_v71
 from deeplscalp.modeling.calibration_v71 import (
     apply_temperature_multiclass,
@@ -89,7 +150,13 @@ def _ensure_dir(p: Path) -> None:
 
 
 def _load_cfg(path: str) -> Dict:
-    with open(path, "r", encoding="utf-8") as f:
+    p = Path(path)
+    if not p.exists():
+        _maybe_generate_kaggle_cfg(p)
+    if not p.exists():
+        raise FileNotFoundError(f"No existe el archivo de configuración: {p}")
+
+    with open(p, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     if not isinstance(cfg, dict):
         raise ValueError(f"Config inválido o vacío: {path}")
