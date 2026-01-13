@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -86,7 +87,7 @@ from deeplscalp.backtest.sim_v71 import (backtest_from_predictions_v71,
 from deeplscalp.modeling.calibration_v71 import (apply_temperature_multiclass,
                                                  fit_temperature_multiclass)
 from deeplscalp.modeling.train_v71 import predict_v71, train_model_v71
-from deeplscalp.tuning.objective_v71 import robust_objective
+from deeplscalp.tuning.objective_v72 import robust_objective_v2
 
 
 def ensure_ds_column(df: pd.DataFrame) -> pd.DataFrame:
@@ -289,16 +290,18 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
         s = profit_factor_stats(np.array([1.0, pf, -1.0]), pf_cap)  # Dummy array para calcular stats
         zero_loss = s.zero_loss
 
-        obj_score = robust_objective(
+        obj_score = robust_objective_v2(
             pf=pf,
+            net_return=0.0,  # TODO: compute actual net return
             mdd=mdd,
             ntr=ntr,
-            zero_loss=zero_loss,
-            pf_cap=pf_cap,
+            turnover=0.0,  # TODO: compute turnover
+            avg_hold_bars=0.0,  # TODO: compute avg hold bars
+            pf_cap=50.0,  # higher cap
             ntr_min=int(obj_cfg.get("ntr_min", 150)),
             lam_mdd=mdd_penalty,
             beta_ntr=tr_penalty,
-            gamma_zero_loss=overtrade_penalty,
+            gamma_hold=0.2,
         )
 
         print(f"[tuner] pf={pf:.3f} mdd={mdd:.3f} ntr={ntr} zero_loss={zero_loss} obj={obj_score:.3f}")
