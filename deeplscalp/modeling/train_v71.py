@@ -255,6 +255,11 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
 
     # AMP setup
     amp_enabled = bool(tcfg.get("amp", False))
+
+    # Normaliza device: puede venir como 'cuda'/'cpu' (str) desde scripts/CLI
+    if isinstance(device, str):
+        device = torch.device(device)
+
     device_type = "cuda" if device.type == "cuda" else "cpu"
     amp_scaler = make_grad_scaler(device_type=device_type, enabled=amp_enabled)
 
