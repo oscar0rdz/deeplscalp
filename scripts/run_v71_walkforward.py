@@ -538,7 +538,6 @@ def main() -> None:
 
         # Guardar trades auditables
         if "trade_ret_raw" in diag:
-            import pandas as pd
             trades = pd.DataFrame({
                 "ret_raw": diag["trade_ret_raw"],
                 "ret_net": diag.get("trade_ret_net", diag["trade_ret_raw"]),
