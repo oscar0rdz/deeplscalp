@@ -1,9 +1,33 @@
 import heapq
-import numpy as np
-import pandas as pd
 from dataclasses import dataclass
 
+import numpy as np
+import pandas as pd
+
 EPS = 1e-12
+
+@dataclass(frozen=True)
+class ExecConfig:
+    exec_lag_bars: int = 1          # 1 = next bar
+    fee_bps: float = 4.0            # por lado (entry y exit)
+    spread_bps: float = 1.0         # costo implícito (half-spread por lado si market)
+    slippage_bps: float = 2.0       # base
+    slippage_atr_k: float = 0.0     # extra proporcional a ATR/price (si quieres)
+
+def _bps_cost_to_ret(cost_bps: float) -> float:
+    return float(cost_bps) * 1e-4
+
+def apply_costs(raw_ret: np.ndarray, n_trades: int, exec_cfg: ExecConfig, atr_rel: float | None = None):
+    """
+    Aplica costos por trade de manera consistente: entry+exit.
+    raw_ret: retorno neto antes de costos por trade (no por barra)
+    """
+    fee = 2.0 * _bps_cost_to_ret(exec_cfg.fee_bps)
+    spread = 2.0 * _bps_cost_to_ret(exec_cfg.spread_bps)
+    slip = 2.0 * _bps_cost_to_ret(exec_cfg.slippage_bps)
+    if atr_rel is not None and exec_cfg.slippage_atr_k > 0:
+        slip += 2.0 * float(exec_cfg.slippage_atr_k) * float(atr_rel)
+    return raw_ret - (fee + spread + slip), (fee, spread, slip)
 
 # Caps realistas para evitar que Optuna se "escape" con gross_loss≈0
 PF_EPS = 1e-8
@@ -137,6 +161,7 @@ def backtest_from_predictions_v71(
     cost_mult: float = 1.0,
     latency_bars: int = 0,
     adaptive_gating: bool = True,
+    exec_cfg: ExecConfig | None = None,
 ):
     """
     Sim V7.1 PRO:
@@ -507,6 +532,21 @@ def backtest_from_predictions_v71(
             continue
 
     r = np.asarray(rets, dtype=np.float64)
+
+    diag = {}
+
+    # Aplicar costos detallados si exec_cfg está definido
+    if exec_cfg is not None:
+        atr_rel = np.mean(atr[entry_i] / entry_px) if entry_i < len(atr) else None
+        r_net, (fee, spread, slip) = apply_costs(r, len(r), exec_cfg, atr_rel)
+        # Guardar métricas de costos
+        diag["fee_per_trade"] = float(fee)
+        diag["spread_per_trade"] = float(spread)
+        diag["slip_per_trade"] = float(slip)
+        diag["trade_ret_raw"] = r.copy()
+        diag["trade_ret_net"] = r_net.copy()
+        r = r_net
+
     eq = np.asarray(equity, dtype=np.float64)
 
     n_trades = int(len(r))
@@ -523,7 +563,7 @@ def backtest_from_predictions_v71(
         "median_ret_per_trade": float(np.median(r)) if n_trades else 0.0,
     }
 
-    diag = {
+    diag.update({
         "n_trades": n_trades,
         "mean_ret": float(r.mean()) if n_trades else 0.0,
         "cost_rt_base": float(dbg["cost_rt_base"]),
@@ -532,7 +572,7 @@ def backtest_from_predictions_v71(
         "entered_ev_mean": float(np.mean(entered_ev)) if entered_ev else 0.0,
         "entered_ev_median": float(np.median(entered_ev)) if entered_ev else 0.0,
         "dbg": dbg,
-    }
+    })
 
     return metrics, diag
 

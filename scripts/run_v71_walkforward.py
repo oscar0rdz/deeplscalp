@@ -81,11 +81,10 @@ def _maybe_generate_kaggle_cfg(path: Path):
     path.write_text(yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False), encoding="utf-8")
     print(f"[CONFIG] Auto-generated {path} from {base_path}")
 
-from deeplscalp.backtest.sim_v71 import backtest_from_predictions_v71, profit_factor_stats
-from deeplscalp.modeling.calibration_v71 import (
-    apply_temperature_multiclass,
-    fit_temperature_multiclass,
-)
+from deeplscalp.backtest.sim_v71 import (backtest_from_predictions_v71,
+                                         profit_factor_stats)
+from deeplscalp.modeling.calibration_v71 import (apply_temperature_multiclass,
+                                                 fit_temperature_multiclass)
 from deeplscalp.modeling.train_v71 import predict_v71, train_model_v71
 from deeplscalp.tuning.objective_v71 import robust_objective
 
@@ -188,6 +187,7 @@ def make_folds(df: pd.DataFrame, cfg: dict) -> List[dict]:
     val_days = int(w.get("val_days", 30))
     test_days = int(w.get("test_days", 30))
     step_days = int(w.get("step_days", 30))
+    purge_days = int(w.get("purge_days", 10))  # Anti-leakage gap
 
     max_folds = int(cfg.get("data", {}).get("max_folds", 24))
 
@@ -253,7 +253,8 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
         score_q = trial.suggest_float("score_q", 0.80, 0.99)
         q_width_max = trial.suggest_float("q_width_max", 0.02, 0.20)
         ev_buffer = trial.suggest_float("ev_buffer", -0.0003, 0.0010)
-        topk = trial.suggest_int("top_k", 1500, 12000)
+        topk_frac = trial.suggest_float("topk_frac", 0.001, 0.02, log=True)  # 0.1% a 2%
+        top_k = max(50, int(topk_frac * len(pred_val)))
         atr_min = trial.suggest_float("atr_min", 0.0, 0.0005)
         rv_min = trial.suggest_float("rv_min", 0.0, 0.0002)
         rv_max = trial.suggest_float("rv_max", 0.0003, 0.0030)
@@ -263,7 +264,7 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
             "score_q": score_q,
             "q_width_max": q_width_max,
             "ev_abs_min": ev_buffer,
-            "top_k": topk,
+            "top_k": top_k,
             "use_topk": True,
             "thr_lookback_bars": 4000,
             "ood_q": 0.90,
@@ -526,7 +527,7 @@ def main() -> None:
                 pred_test[["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"]].values, T_evt
             ))
 
-        met, _diag = backtest_from_predictions_v71(pred_test, cfg, best_thresholds)
+        met, diag = backtest_from_predictions_v71(pred_test, cfg, best_thresholds)
 
         fold_dir = out_dir / "reports" / f"fold_{fold['fold_id']}"
         _ensure_dir(fold_dir)
@@ -534,6 +535,18 @@ def main() -> None:
 
         with open(fold_dir / "metrics_test.json", "w", encoding="utf-8") as f:
             json.dump(met, f, indent=2)
+
+        # Guardar trades auditables
+        if "trade_ret_raw" in diag:
+            import pandas as pd
+            trades = pd.DataFrame({
+                "ret_raw": diag["trade_ret_raw"],
+                "ret_net": diag.get("trade_ret_net", diag["trade_ret_raw"]),
+                "fee_per_trade": diag.get("fee_per_trade", 0.0),
+                "spread_per_trade": diag.get("spread_per_trade", 0.0),
+                "slip_per_trade": diag.get("slip_per_trade", 0.0),
+            })
+            trades.to_csv(fold_dir / "trades.csv", index=False)
 
         all_fold_metrics.append({"fold": fold["fold_id"], **met})
 
