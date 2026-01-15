@@ -280,23 +280,26 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
             "rv_max": rv_max,
         }
 
-        met, _ = backtest_from_predictions_v71(pred_val, cfg, thresholds)
+        met, diag = backtest_from_predictions_v71(pred_val, cfg, thresholds)
 
-        pf = float(_pick(met, ["pf_x2", "pf_x2_lat1", "PF_strict_x2_lat1", "profit_factor"], 0.0))
+        pf_capped = float(_pick(met, ["pf_x2", "pf_x2_lat1", "PF_strict_x2_lat1", "profit_factor"], 0.0))
         mdd = float(_pick(met, ["mdd_x2", "max_drawdown_x2", "max_drawdown"], 0.0))
         ntr = int(_pick(met, ["ntr_x2", "n_trades_x2", "n_trades"], 0))
 
-        # Usar objetivo robusto que previene autoengaño
-        s = profit_factor_stats(np.array([1.0, pf, -1.0]), pf_cap)  # Dummy array para calcular stats
-        zero_loss = s.zero_loss
+        # Compute raw PF from trade returns
+        trade_rets = diag.get("trade_ret_raw", np.array([]))
+        if len(trade_rets) > 0:
+            pf_raw = profit_factor_stats(trade_rets, pf_cap=1e6).pf  # high cap to get raw
+        else:
+            pf_raw = 0.0
 
         obj_score = robust_objective_v2(
-            pf=pf,
+            pf=pf_raw,  # use raw PF
             net_return=0.0,  # TODO: compute actual net return
             mdd=mdd,
             ntr=ntr,
             turnover=0.0,  # TODO: compute turnover
-            avg_hold_bars=0.0,  # TODO: compute avg hold bars
+            avg_hold_bars=diag.get("avg_hold_bars", 0.0),
             pf_cap=50.0,  # higher cap
             ntr_min=int(obj_cfg.get("ntr_min", 150)),
             lam_mdd=mdd_penalty,
@@ -304,7 +307,7 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
             gamma_hold=0.2,
         )
 
-        print(f"[tuner] pf={pf:.3f} mdd={mdd:.3f} ntr={ntr} zero_loss={zero_loss} obj={obj_score:.3f}")
+        print(f"[tuner] pf_raw={pf_raw:.3f} pf_capped={pf_capped:.3f} mdd={mdd:.3f} ntr={ntr} obj={obj_score:.3f}")
         return float(obj_score)
 
     return obj

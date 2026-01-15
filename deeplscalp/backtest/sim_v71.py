@@ -334,6 +334,13 @@ def backtest_from_predictions_v71(
     # Diagnóstico de edge
     entered_ev = []
 
+    # Detailed trades and equity
+    trades_list = []
+    equity_ts = []
+    equity_values = []
+    equity_dd = []
+    position_list = []
+
     n = len(df)
     for i in range(n):
         if cooldown > 0:
@@ -470,6 +477,29 @@ def backtest_from_predictions_v71(
                 rets.append(trade_ret)
                 equity.append(equity[-1] * (1.0 + trade_ret))
                 holds.append(bars_in)
+                # Record trade
+                ts_entry = df.index[entry_i]
+                ts_exit = df.index[i]
+                ret_raw = trade_ret + (cost_rt_notional * leverage * risk_fraction)  # raw before costs
+                ret_net = trade_ret
+                fee = cost_rt_notional * leverage * risk_fraction * 0.5  # approx per side
+                spread = 0.0  # not detailed
+                slip = 0.0
+                reason_exit = "reeval"
+                trades_list.append({
+                    "ts_entry": ts_entry,
+                    "ts_exit": ts_exit,
+                    "side": "long" if side == 1 else "short",
+                    "entry_price": entry_px,
+                    "exit_price": ex,
+                    "ret_raw": ret_raw,
+                    "ret_net": ret_net,
+                    "fee": fee,
+                    "slippage": slip,
+                    "spread": spread,
+                    "holding_bars": bars_in,
+                    "reason_exit": reason_exit,
+                })
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_reeval"] += 1
@@ -487,6 +517,29 @@ def backtest_from_predictions_v71(
                 rets.append(trade_ret)
                 equity.append(equity[-1] * (1.0 + trade_ret))
                 holds.append(bars_in)
+                # Record trade
+                ts_entry = df.index[entry_i]
+                ts_exit = df.index[i]
+                ret_raw = trade_ret + (cost_rt_notional * leverage * risk_fraction)
+                ret_net = trade_ret
+                fee = cost_rt_notional * leverage * risk_fraction * 0.5
+                spread = 0.0
+                slip = 0.0
+                reason_exit = "time"
+                trades_list.append({
+                    "ts_entry": ts_entry,
+                    "ts_exit": ts_exit,
+                    "side": "long" if side == 1 else "short",
+                    "entry_price": entry_px,
+                    "exit_price": ex,
+                    "ret_raw": ret_raw,
+                    "ret_net": ret_net,
+                    "fee": fee,
+                    "slippage": slip,
+                    "spread": spread,
+                    "holding_bars": bars_in,
+                    "reason_exit": reason_exit,
+                })
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_time"] += 1
@@ -512,6 +565,29 @@ def backtest_from_predictions_v71(
             rets.append(trade_ret)
             equity.append(equity[-1] * (1.0 + trade_ret))
             holds.append(bars_in)
+            # Record trade
+            ts_entry = df.index[entry_i]
+            ts_exit = df.index[i]
+            ret_raw = trade_ret + (cost_rt_notional * leverage * risk_fraction)
+            ret_net = trade_ret
+            fee = cost_rt_notional * leverage * risk_fraction * 0.5
+            spread = 0.0
+            slip = 0.0
+            reason_exit = "sl"
+            trades_list.append({
+                "ts_entry": ts_entry,
+                "ts_exit": ts_exit,
+                "side": "long" if side == 1 else "short",
+                "entry_price": entry_px,
+                "exit_price": sl_px,
+                "ret_raw": ret_raw,
+                "ret_net": ret_net,
+                "fee": fee,
+                "slippage": slip,
+                "spread": spread,
+                "holding_bars": bars_in,
+                "reason_exit": reason_exit,
+            })
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_sl"] += 1
@@ -526,6 +602,29 @@ def backtest_from_predictions_v71(
             rets.append(trade_ret)
             equity.append(equity[-1] * (1.0 + trade_ret))
             holds.append(bars_in)
+            # Record trade
+            ts_entry = df.index[entry_i]
+            ts_exit = df.index[i]
+            ret_raw = trade_ret + (cost_rt_notional * leverage * risk_fraction)
+            ret_net = trade_ret
+            fee = cost_rt_notional * leverage * risk_fraction * 0.5
+            spread = 0.0
+            slip = 0.0
+            reason_exit = "tp"
+            trades_list.append({
+                "ts_entry": ts_entry,
+                "ts_exit": ts_exit,
+                "side": "long" if side == 1 else "short",
+                "entry_price": entry_px,
+                "exit_price": tp_px,
+                "ret_raw": ret_raw,
+                "ret_net": ret_net,
+                "fee": fee,
+                "slippage": slip,
+                "spread": spread,
+                "holding_bars": bars_in,
+                "reason_exit": reason_exit,
+            })
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_tp"] += 1
@@ -549,6 +648,39 @@ def backtest_from_predictions_v71(
 
     eq = np.asarray(equity, dtype=np.float64)
 
+    # Build trades_df
+    trades_df = pd.DataFrame(trades_list)
+
+    # Build equity_df: ts, equity, dd, position
+    # Since equity is at trade exits, we need to build per bar
+    current_equity = 1.0
+    equity_idx = 0
+    position = 0
+    for i in range(n):
+        ts = df.index[i]
+        if equity_idx < len(eq):
+            current_equity = eq[equity_idx]
+            if equity_idx < len(eq) - 1:
+                equity_idx += 1  # move to next after trade
+        dd = _max_drawdown(eq[:equity_idx+1]) if equity_idx > 0 else 0.0
+        equity_ts.append(ts)
+        equity_values.append(current_equity)
+        equity_dd.append(dd)
+        position_list.append(position)
+
+        # Update position if trade happened at this bar
+        if in_pos and entry_i == i:
+            position = side
+        elif not in_pos and any(t['ts_exit'] == ts for t in trades_list):
+            position = 0
+
+    equity_df = pd.DataFrame({
+        "ts": equity_ts,
+        "equity": equity_values,
+        "dd": equity_dd,
+        "position": position_list,
+    })
+
     n_trades = int(len(r))
     winrate = float((r > 0).mean()) if n_trades else 0.0
 
@@ -571,6 +703,8 @@ def backtest_from_predictions_v71(
         "avg_hold_bars": float(np.mean(holds)) if holds else 0.0,
         "entered_ev_mean": float(np.mean(entered_ev)) if entered_ev else 0.0,
         "entered_ev_median": float(np.median(entered_ev)) if entered_ev else 0.0,
+        "trades_df": trades_df,
+        "equity_df": equity_df,
         "dbg": dbg,
     })
 
