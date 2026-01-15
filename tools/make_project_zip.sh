@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT/.."
+cd "$ROOT"
 
-# Debe existir carpeta project/
-if [ ! -d "project" ]; then
-  echo "No existe carpeta project/ en $(pwd)"
-  exit 1
-fi
+rm -f ../project.zip
 
-rm -f project.zip
+# Crea temp dir con project/
+TEMP_DIR="$(mktemp -d)"
+mkdir -p "$TEMP_DIR/project"
 
-# Excluye basura típica
-zip -r project.zip project \
-  -x "project/.git/*" \
-  -x "project/**/__pycache__/*" \
-  -x "project/**/.ipynb_checkpoints/*" \
-  -x "project/artifacts/**" \
-  -x "project/.venv/*" \
-  -x "project/.mypy_cache/*" \
-  -x "project/.pytest_cache/*"
+# Copia excluyendo basura
+rsync -a --exclude='.git' --exclude='__pycache__' --exclude='.ipynb_checkpoints' --exclude='artifacts' --exclude='.venv' --exclude='.mypy_cache' --exclude='.pytest_cache' . "$TEMP_DIR/project/"
+
+# Zip
+cd "$TEMP_DIR"
+zip -r ../project.zip .
+
+# Limpia
+cd ..
+rm -rf "$TEMP_DIR"
 
 echo "OK -> $(pwd)/project.zip"
