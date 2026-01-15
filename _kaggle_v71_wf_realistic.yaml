@@ -1,0 +1,34 @@
+# Config robusta y realista para Kaggle / v71
+
+pair: "XRP_USDT"
+tf: "5m"
+
+data:
+  path: "/kaggle/input/parquet-v1/train_XRP_USDT_5m_v71.parquet"
+  time_col: "timestamp" # CAMBIA a "ts" / "datetime" según tu parquet
+  strict_time: true
+
+train:
+  device: "auto"
+  max_folds: 3
+  seed: 42
+  epochs: 50
+  early_stop_patience: 6
+  batch_size: 2048
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  label_smoothing: 0.05
+
+backtest:
+  # Costos (conservadores para scalping; ajusta según tu exchange)
+  fees_bps_roundtrip: 8.0 # ~0.08% round trip
+  spread_bps_roundtrip: 4.0 # spread estimado
+  slippage_bps_roundtrip: 6.0 # slippage/impacto
+  latency_bars: 1 # ejecuta en la siguiente barra
+
+tuner:
+  n_trials: 60
+  min_trades: 200
+  min_drawdown: 0.002 # si dd demasiado cercano a 0, sospechoso
+  pf_cap: 20.0
+  objective: "calmar" # usa retorno neto / dd

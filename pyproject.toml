@@ -3,22 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "deeplscalp"
-version = "0.0.0"
-description = "DeepLScalp research code"
+name = "deeplscalp-project"
+version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = []
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["deeplscalp*", "training*"]
+[tool.setuptools]
+packages = {find = {where = ["."]}}
 
-[tool.black]
-line-length = 100
-
-[tool.ruff]
-line-length = 100
-select = ["E","F","I","UP","B"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+[tool.setuptools.package-dir]
+"" = "."

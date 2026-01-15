@@ -1,4 +1,4 @@
-# scripts/run_v71_walkforward.py
+ # scripts/run_v71_walkforward.py
 from __future__ import annotations
 
 import argparse
@@ -82,12 +82,72 @@ def _maybe_generate_kaggle_cfg(path: Path):
     path.write_text(yaml.safe_dump(cfg, sort_keys=False, default_flow_style=False), encoding="utf-8")
     print(f"[CONFIG] Auto-generated {path} from {base_path}")
 
+import math
+
 from deeplscalp.backtest.sim_v71 import (backtest_from_predictions_v71,
                                          profit_factor_stats)
 from deeplscalp.modeling.calibration_v71 import (apply_temperature_multiclass,
                                                  fit_temperature_multiclass)
 from deeplscalp.modeling.train_v71 import predict_v71, train_model_v71
 from deeplscalp.tuning.objective_v72 import robust_objective_v2
+from deeplscalp.utils.metrics import max_drawdown, profit_factor
+
+
+def compute_objective(pnls, equity_curve, n_trades, cfg):
+    # Config
+    tcfg = cfg.get("tuner", {})
+    min_trades = int(tcfg.get("min_trades", 200))
+    min_dd = float(tcfg.get("min_drawdown", 0.002))
+    pf_cap = float(tcfg.get("pf_cap", 20.0))
+    objective = str(tcfg.get("objective", "calmar"))
+
+    pnls = np.asarray(pnls, dtype=float)
+    eq = np.asarray(equity_curve, dtype=float)
+
+    pf = profit_factor(pnls, cap=pf_cap)
+    mdd = max_drawdown(eq)
+    equity_final = float(eq[-1]) if eq.size else 1.0
+    net = equity_final - 1.0
+
+    # Penalizaciones duras (anti autoengaño)
+    if n_trades < min_trades:
+        return -1e6 + n_trades, pf, mdd, equity_final
+    if mdd < min_dd:
+        # drawdown demasiado "perfecto" -> sospecha de bug/latencia/costos/llenado
+        return -1e5 - (min_dd - mdd), pf, mdd, equity_final
+    if pf.flag in ("no_trades",):
+        return -1e6, pf, mdd, equity_final
+
+    # Objetivos robustos
+    if objective == "calmar":
+        calmar = net / max(mdd, 1e-6)
+        # queremos maximizar -> optuna suele minimizar: devolvemos negativo
+        obj = -calmar
+    elif objective == "net":
+        obj = -net
+    else:
+        # fallback: mezcla (net y pf sin cap)
+        pf_val = pf.pf_raw if math.isfinite(pf.pf_raw) else pf_cap
+        obj = -(net * 100.0) + (mdd * 10.0) - (min(pf_val, pf_cap) * 0.1)
+
+    # Si no hay pérdidas (pf infinito), no permitas "paraíso" sin net real
+    if pf.flag == "no_losses" and net < 0.01:
+        obj += 100.0  # castigo
+
+    return obj, pf, mdd, equity_final
+
+
+def enforce_time_order(df, time_col: str, strict: bool = True):
+    if time_col not in df.columns:
+        if strict:
+            raise ValueError(f"time_col='{time_col}' no existe. No se permite entrenar sin orden temporal estricto.")
+        return df
+    df = df.sort_values(time_col).reset_index(drop=True)
+    # monotonicidad
+    t = df[time_col].values
+    if (t[1:] < t[:-1]).any():
+        raise ValueError("La columna temporal no quedó monótona tras sort. Dataset corrupto o time_col incorrecta.")
+    return df
 
 
 def ensure_ds_column(df: pd.DataFrame) -> pd.DataFrame:
@@ -282,32 +342,13 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
 
         met, diag = backtest_from_predictions_v71(pred_val, cfg, thresholds)
 
-        pf_capped = float(_pick(met, ["pf_x2", "pf_x2_lat1", "PF_strict_x2_lat1", "profit_factor"], 0.0))
-        mdd = float(_pick(met, ["mdd_x2", "max_drawdown_x2", "max_drawdown"], 0.0))
         ntr = int(_pick(met, ["ntr_x2", "n_trades_x2", "n_trades"], 0))
-
-        # Compute raw PF from trade returns
         trade_rets = diag.get("trade_ret_raw", np.array([]))
-        if len(trade_rets) > 0:
-            pf_raw = profit_factor_stats(trade_rets, pf_cap=1e6).pf  # high cap to get raw
-        else:
-            pf_raw = 0.0
+        equity_curve = diag.get("equity", [1.0])
 
-        obj_score = robust_objective_v2(
-            pf=pf_raw,  # use raw PF
-            net_return=0.0,  # TODO: compute actual net return
-            mdd=mdd,
-            ntr=ntr,
-            turnover=0.0,  # TODO: compute turnover
-            avg_hold_bars=diag.get("avg_hold_bars", 0.0),
-            pf_cap=50.0,  # higher cap
-            ntr_min=int(obj_cfg.get("ntr_min", 150)),
-            lam_mdd=mdd_penalty,
-            beta_ntr=tr_penalty,
-            gamma_hold=0.2,
-        )
+        obj_score, pf, mdd, equity_final = compute_objective(trade_rets, equity_curve, ntr, cfg)
 
-        print(f"[tuner] pf_raw={pf_raw:.3f} pf_capped={pf_capped:.3f} mdd={mdd:.3f} ntr={ntr} obj={obj_score:.3f}")
+        print(f"[tuner] pf_raw={pf.pf_raw:.3f} pf_capped={pf.pf_capped:.3f} mdd={mdd:.3f} ntr={ntr} net={equity_final-1:.3f} obj={obj_score:.3f}")
         return float(obj_score)
 
     return obj
@@ -403,6 +444,11 @@ def main() -> None:
 
     df = pd.read_parquet(ds_path)
     df = ensure_ds_column(df)
+
+    # Enforce strict temporal order
+    time_col = cfg.get("data", {}).get("time_col", "ds")
+    strict_time = cfg.get("data", {}).get("strict_time", True)
+    df = enforce_time_order(df, time_col, strict_time)
 
     # BUGFIX: conservar ds aunque se use como índice
     df = df.sort_values("ds").reset_index(drop=True)
