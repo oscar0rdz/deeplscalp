@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from contextlib import contextmanager
+import json
 import os
 import time
-import json
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
+
 
 # ---------- AMP / device robusto (Kaggle Py3.12 + torch nuevo) ----------
 @contextmanager
@@ -49,15 +51,16 @@ def make_grad_scaler(device_type: str, enabled: bool = True):
 # --- AMP compatibility (torch.amp vs torch.cuda.amp) ---
 AMP_API = "unknown"
 try:
-    from torch.amp import autocast as _autocast
     from torch.amp import GradScaler as _GradScaler
+    from torch.amp import autocast as _autocast
     AMP_API = "torch.amp"
 except Exception:
-    from torch.cuda.amp import autocast as _autocast
     from torch.cuda.amp import GradScaler as _GradScaler
+    from torch.cuda.amp import autocast as _autocast
     AMP_API = "torch.cuda.amp"
 
-from training.itransformer_v71 import ITransformerV71, ITransV71Config, quantile_loss
+from training.itransformer_v71 import (ITransformerV71, ITransV71Config,
+                                       quantile_loss)
 
 
 @dataclass
@@ -512,7 +515,8 @@ def predict_v71(model, scaler, df: pd.DataFrame, feature_cols: list[str], cfg: d
         out[f"qS{int(q*100):02d}_reg"] = qS_all[:, j].astype("float32")
 
     # desescalado a gross (si existe vol_scale)
-    if bool(cfg["labels"].get("vol_scaled", True)) and "vol_scale" in df.columns:
+    labels_cfg = cfg.get("labels", {}) or {}
+    if bool(labels_cfg.get("vol_scaled", True)) and "vol_scale" in df.columns:
         vs = df.loc[idx, "vol_scale"].astype("float32")
         out["vol_scale"] = vs.values
         for qq in [10, 50, 90]:

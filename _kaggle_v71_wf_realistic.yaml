@@ -9,6 +9,9 @@ data:
   time_col: ds
   strict_time: true
 
+labels:
+  vol_scaled: true
+
 features:
   seq_len: 192
   adx_period: 14
