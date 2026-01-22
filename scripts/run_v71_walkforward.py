@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -137,11 +138,19 @@ def compute_objective(pnls, equity_curve, n_trades, cfg):
     return obj, pf, mdd, equity_final
 
 
-def enforce_time_order(df, time_col: str, strict: bool = True):
+def enforce_time_order(df, time_col: str = "ds", strict: bool = True):
     if time_col not in df.columns:
-        if strict:
-            raise ValueError(f"time_col='{time_col}' no existe. No se permite entrenar sin orden temporal estricto.")
-        return df
+        # autodetect
+        candidates = ["ds", "timestamp", "date", "datetime", "time", "open_time", "close_time"]
+        for c in candidates:
+            if c in df.columns:
+                time_col = c
+                break
+        else:
+            if strict:
+                raise ValueError("No se encontró columna temporal. Candidatos: ds, timestamp, date, datetime, time, open_time, close_time")
+            return df
+    df["timestamp"] = df[time_col]
     df = df.sort_values(time_col).reset_index(drop=True)
     # monotonicidad
     t = df[time_col].values
@@ -433,13 +442,15 @@ def main() -> None:
             if args.no_build or use_prebuilt:
                 raise FileNotFoundError(msg)
             print(msg + "       building via pipeline...")
-            subprocess.run(["python", "pipeline.py", "--config", args.config, "build"], check=True)
+            subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
             ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
     else:
         if use_prebuilt and args.no_build:
             raise ValueError("[DATA] use_prebuilt activo pero no hay directorio de prebuilt configurado.")
+        if args.no_build:
+            raise ValueError("[DATA] No prebuilt dir specified and --no-build used; cannot build dataset.")
         # comportamiento legacy
-        subprocess.run(["python", "pipeline.py", "--config", args.config, "build"], check=True)
+        subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
         ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
 
     df = pd.read_parquet(ds_path)

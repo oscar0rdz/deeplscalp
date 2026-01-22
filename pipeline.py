@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
-from pandas.api.types import is_numeric_dtype, is_datetime64_any_dtype
 import pandas as pd
 import yaml
+from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
 
 try:
     import pandas_ta as pta
@@ -478,6 +478,10 @@ def cmd_clean(cfg: Dict) -> None:
 
 
 def cmd_build(cfg: Dict) -> None:
+    if "freqtrade" not in cfg:
+        print("No 'freqtrade' config found, skipping build.")
+        return
+
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
     raw_dir = Path(cfg["freqtrade"]["datadir"]).expanduser()
