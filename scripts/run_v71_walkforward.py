@@ -151,6 +151,20 @@ def enforce_time_order(df, time_col: str = "timestamp", strict_time: bool = True
     if df is None or len(df) == 0:
         return df
 
+    # [KAGGLE PATCH][TIME] Auto-detección de columna temporal si no existe time_col
+    if time_col not in df.columns:
+        # candidatos típicos
+        candidates = ["ds", "datetime", "date", "time"]
+        found = next((c for c in candidates if c in df.columns), None)
+        if found is not None:
+            # crea alias timestamp para compatibilidad
+            if "timestamp" not in df.columns and found != "timestamp":
+                df = df.copy()
+                df["timestamp"] = df[found]
+            time_col = found
+        elif strict_time:
+            raise ValueError(f"time_col='{time_col}' no existe. No se permite entrenar sin orden temporal estricto.")
+
     # 1) Autodetección de columna temporal
     if time_col not in df.columns:
         candidates = [time_col, "timestamp", "ds", "date", "datetime", "time"]

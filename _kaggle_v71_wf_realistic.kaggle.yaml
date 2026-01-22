@@ -1,0 +1,7 @@
+# Overrides para Kaggle: hereda de _kaggle_v71_wf_realistic.yaml
+
+data:
+  prebuilt_dir: artifacts/datasets
+  parquet_path: artifacts/datasets/train_XRP_USDT_5m_v71.parquet
+  time_col: ds
+  strict_time: true
