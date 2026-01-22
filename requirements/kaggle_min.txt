@@ -1,0 +1,9 @@
+numpy
+pandas
+pyarrow
+pyyaml
+tqdm
+scikit-learn
+optuna
+fastparquet
+wrapt

@@ -478,8 +478,9 @@ def cmd_clean(cfg: Dict) -> None:
 
 
 def cmd_build(cfg: Dict) -> None:
-    if "freqtrade" not in cfg:
-        print("No 'freqtrade' config found, skipping build.")
+    # [KAGGLE PATCH] Si falta 'freqtrade', se asume dataset preconstruido y se omite build.
+    if not isinstance(cfg, dict) or "freqtrade" not in cfg:
+        print("[BUILD] Sin sección 'freqtrade' en config; saltando build.")
         return
 
     from concurrent.futures import ProcessPoolExecutor, as_completed

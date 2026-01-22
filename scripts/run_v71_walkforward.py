@@ -138,24 +138,54 @@ def compute_objective(pnls, equity_curve, n_trades, cfg):
     return obj, pf, mdd, equity_final
 
 
-def enforce_time_order(df, time_col: str = "ds", strict: bool = True):
+def enforce_time_order(df, time_col: str = "timestamp", strict_time: bool = True):
+    """
+    Asegura orden temporal estricto.
+    - Si no existe time_col, autodetecta: ds/timestamp/date/datetime/time
+    - Si encuentra ds, crea alias df['timestamp'] para compatibilidad
+    - Ordena, deduplica y valida monotonicidad
+    """
+    import pandas as pd
+    from pandas.api.types import is_datetime64_any_dtype
+
+    if df is None or len(df) == 0:
+        return df
+
+    # 1) Autodetección de columna temporal
     if time_col not in df.columns:
-        # autodetect
-        candidates = ["ds", "timestamp", "date", "datetime", "time", "open_time", "close_time"]
+        candidates = [time_col, "timestamp", "ds", "date", "datetime", "time"]
+        found = None
         for c in candidates:
             if c in df.columns:
-                time_col = c
+                found = c
                 break
-        else:
-            if strict:
-                raise ValueError("No se encontró columna temporal. Candidatos: ds, timestamp, date, datetime, time, open_time, close_time")
+        if found is None:
+            if strict_time:
+                raise ValueError(
+                    f"time_col='{time_col}' no existe y no se detectó columna temporal alternativa. "
+                    "No se permite entrenar sin orden temporal estricto."
+                )
             return df
-    df["timestamp"] = df[time_col]
-    df = df.sort_values(time_col).reset_index(drop=True)
-    # monotonicidad
-    t = df[time_col].values
-    if (t[1:] < t[:-1]).any():
-        raise ValueError("La columna temporal no quedó monótona tras sort. Dataset corrupto o time_col incorrecta.")
+        time_col = found
+
+    # 2) Alias 'timestamp' si falta
+    if "timestamp" not in df.columns and time_col != "timestamp":
+        df = df.copy()
+        df["timestamp"] = df[time_col]
+
+    # 3) Asegurar datetime
+    if not is_datetime64_any_dtype(df[time_col]):
+        df = df.copy()
+        df[time_col] = pd.to_datetime(df[time_col], errors="coerce", utc=True)
+
+    # 4) Limpiar/ordenar/deduplicar
+    df = df.dropna(subset=[time_col]).sort_values(time_col)
+    df = df.drop_duplicates(subset=[time_col], keep="first").reset_index(drop=True)
+
+    # 5) Validación estricta
+    if strict_time and (not df[time_col].is_monotonic_increasing):
+        raise ValueError("[TIME] La columna temporal no quedó estrictamente creciente tras ordenar/deduplicar.")
+
     return df
 
 
@@ -442,15 +472,56 @@ def main() -> None:
             if args.no_build or use_prebuilt:
                 raise FileNotFoundError(msg)
             print(msg + "       building via pipeline...")
-            subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
+            if getattr(args, "no_build", False):
+                print("[BUILD] --no-build activo: saltando pipeline build")
+            else:
+                subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
             ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
     else:
         if use_prebuilt and args.no_build:
             raise ValueError("[DATA] use_prebuilt activo pero no hay directorio de prebuilt configurado.")
-        if args.no_build:
-            raise ValueError("[DATA] No prebuilt dir specified and --no-build used; cannot build dataset.")
-        # comportamiento legacy
-        subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
+        if getattr(args, "no_build", False):
+            data_cfg = cfg.get("data", {}) if isinstance(cfg, dict) else {}
+
+            prebuilt_dir = (
+                data_cfg.get("prebuilt_dir")
+                or data_cfg.get("prebuilt")
+                or data_cfg.get("prebuilt_path")
+                or data_cfg.get("prebuilt_root")
+            )
+            parquet_path = (
+                data_cfg.get("parquet_path")
+                or data_cfg.get("dataset_path")
+                or data_cfg.get("path")
+                or data_cfg.get("parquet")
+            )
+
+            # Fallback automático: artifacts/datasets/*.parquet
+            if not prebuilt_dir and not parquet_path:
+                auto_dir = Path("artifacts/datasets")
+                if auto_dir.exists():
+                    cands = sorted(auto_dir.glob("*.parquet"))
+                    if cands:
+                        parquet_path = str(cands[0])
+                        prebuilt_dir = str(auto_dir)
+                        data_cfg["prebuilt_dir"] = prebuilt_dir
+                        data_cfg["parquet_path"] = parquet_path
+                        cfg["data"] = data_cfg
+                        print(f"[DATA] --no-build: autodetect prebuilt parquet: {parquet_path}")
+                    else:
+                        raise ValueError("[DATA] --no-build activo, pero no hay .parquet en artifacts/datasets/")
+                else:
+                    raise ValueError("[DATA] --no-build activo, pero no existe artifacts/datasets/")
+
+            # Si solo viene parquet_path, inferir prebuilt_dir
+            if parquet_path and not prebuilt_dir:
+                prebuilt_dir = str(Path(parquet_path).resolve().parent)
+                data_cfg["prebuilt_dir"] = prebuilt_dir
+                cfg["data"] = data_cfg
+                print(f"[DATA] --no-build: prebuilt_dir inferido: {prebuilt_dir}")
+
+        else:
+            subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
         ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
 
     df = pd.read_parquet(ds_path)

@@ -4,8 +4,9 @@ pair: "XRP_USDT"
 tf: "5m"
 
 data:
-  path: "/kaggle/input/parquet-v1/train_XRP_USDT_5m_v71.parquet"
-  time_col: "timestamp"
+  prebuilt_dir: artifacts/datasets
+  parquet_path: artifacts/datasets/train_XRP_USDT_5m_v71.parquet
+  time_col: ds
   strict_time: true
 
 features:
