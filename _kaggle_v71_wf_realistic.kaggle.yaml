@@ -1,7 +1,35 @@
-# Overrides para Kaggle: hereda de _kaggle_v71_wf_realistic.yaml
+pair: XRP_USDT
+tf: 5m
 
 data:
   prebuilt_dir: artifacts/datasets
   parquet_path: artifacts/datasets/train_XRP_USDT_5m_v71.parquet
   time_col: ds
   strict_time: true
+
+features:
+  seq_len: 128
+
+model:
+  name: itransformer
+  d_model: 128
+  n_heads: 8
+  n_layers: 4
+  dropout: 0.1
+
+labels:
+  vol_scaled: true
+
+train:
+  epochs: 80
+  batch_size: 256
+  lr: 0.0001
+  patience: 10
+  weight_decay: 0.0001
+
+tuning:
+  n_trials: 30
+
+objective:
+  min_trades: 200
+  pf_cap: 10.0

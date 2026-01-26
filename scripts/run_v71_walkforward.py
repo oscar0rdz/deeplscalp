@@ -352,7 +352,26 @@ def _pick(met: dict, keys: List[str], default=0.0):
 
 
 def objective_factory(cfg: dict, pred_val: pd.DataFrame):
-    obj_cfg = cfg.get("tuning", {}).get("objective", {})
+    # Ajusta esta línea a como lo tengas actualmente:
+    obj_cfg = cfg.get("objective", cfg.get("tuning", {}).get("objective", {}))
+
+    # FIX: si objective viene como string (ej. "realistic"), conviértelo a dict preset
+    if isinstance(obj_cfg, str):
+        name = obj_cfg.strip().lower()
+        if name in ("realistic", "wf_realistic", "kaggle_realistic"):
+            obj_cfg = {
+                "min_trades": 200,
+                "pf_cap": 10.0,
+                "pf_nan_penalty": True,
+            }
+        else:
+            obj_cfg = {}  # fallback seguro
+
+    if obj_cfg is None:
+        obj_cfg = {}
+    if not isinstance(obj_cfg, dict):
+        raise TypeError(f"objective debe ser dict o str preset, llegó: {type(obj_cfg)}")
+
     pf_cap = float(obj_cfg.get("pf_cap", 3.0))
     mdd_target = float(obj_cfg.get("mdd_target", 0.15))
     mdd_penalty = float(obj_cfg.get("mdd_penalty", 2.0))

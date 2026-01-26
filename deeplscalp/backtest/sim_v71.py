@@ -137,6 +137,10 @@ def _rolling_q_past(x: np.ndarray, lookback: int, q: float) -> np.ndarray:
     s = pd.Series(x)
     thr = s.rolling(lookback, min_periods=max(200, lookback // 3)).quantile(q).shift(1)
     out = thr.to_numpy(dtype=np.float64)
+    # FIX: a veces out llega como vista no-writeable (memmap / view)
+    if not out.flags.writeable:
+        out = out.copy()
+
     out[np.isnan(out)] = -np.inf
     return out
 
