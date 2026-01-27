@@ -199,13 +199,19 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
     ds_val = SeqDatasetV71(val_df, Xva_s, feature_cols, seq_len=seq_len)
 
     # GPU-optimized DataLoader
-    workers = int(tcfg.get("num_workers", cfg.get("dataloader_workers", 0)))
+    workers = int(tcfg.get("workers", cfg.get("dataloader_workers", 0)))
     if workers < 0:
         workers = 0
 
     pin_memory = bool(tcfg.get("pin_memory", device.startswith("cuda")))
-    persistent_workers = bool(tcfg.get("persistent_workers", workers > 0))
-    prefetch_factor = int(tcfg.get("prefetch_factor", 2 if workers > 0 else None))
+    persistent_workers = bool(tcfg.get("persistent_workers", False)) if workers > 0 else False
+
+    # --- workers / prefetch_factor robusto ---
+    pf_raw = tcfg.get("prefetch_factor", None)
+    if workers <= 0:
+        prefetch_factor = None
+    else:
+        prefetch_factor = int(pf_raw) if pf_raw is not None else 2
 
     dl_kwargs = {
         "batch_size": int(tcfg["batch_size"]),
@@ -213,7 +219,9 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
         "pin_memory": pin_memory,
         "persistent_workers": persistent_workers,
     }
-    if prefetch_factor and workers > 0:
+
+    # SOLO si workers>0
+    if workers > 0 and prefetch_factor is not None:
         dl_kwargs["prefetch_factor"] = prefetch_factor
 
     dl_train = DataLoader(
