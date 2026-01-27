@@ -17,6 +17,9 @@ model:
   n_layers: 4
   dropout: 0.1
 
+  # FIX requerido por train_v71.py
+  quantiles: [0.1, 0.5, 0.9]
+
 labels:
   vol_scaled: true
 
