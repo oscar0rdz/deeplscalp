@@ -33,6 +33,7 @@ train:
   prefetch_factor: 2
   pin_memory: true
   persistent_workers: true
+  # Kaggle WF stability: workers and prefetch_factor for DataLoader
 
 tuning:
   n_trials: 30
