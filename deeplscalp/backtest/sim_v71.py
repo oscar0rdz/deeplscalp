@@ -6,6 +6,25 @@ import pandas as pd
 
 EPS = 1e-12
 
+def _round_to_step(x: float, step: float) -> float:
+    if step is None or step <= 0:
+        return float(x)
+    return float(np.floor(x / step) * step)
+
+def _round_to_tick(x: float, tick: float) -> float:
+    if tick is None or tick <= 0:
+        return float(x)
+    return float(np.round(x / tick) * tick)
+
+def _apply_spread(mid: float, spread_bps: float, side: str) -> float:
+    # spread_bps=10 => 0.10%
+    half = (spread_bps / 10000.0) / 2.0
+    if side == "ask":
+        return mid * (1.0 + half)
+    if side == "bid":
+        return mid * (1.0 - half)
+    return mid
+
 @dataclass(frozen=True)
 class ExecConfig:
     exec_lag_bars: int = 1          # 1 = next bar
@@ -225,7 +244,7 @@ def backtest_from_predictions_v71(
         iqr = np.ones(len(df), dtype=float)
 
     # COST notional
-    cost_rt_notional = _round_trip_cost_rt(cfg, cost_mult=cost_mult)
+    cost_rt_notional = _round_trip_cost_rt(cfg, cost_mult=cost_mult) if _round_trip_cost_rt(cfg, cost_mult=cost_mult) is not None else 0.0
 
     # EV net notional
     evL_net = (pL_tp * np.maximum(qL90, 0.0)) + (pL_sl * np.minimum(qL10, 0.0)) - cost_rt_notional
@@ -436,6 +455,40 @@ def backtest_from_predictions_v71(
                 dbg["skip_atr"] += 1
                 continue
 
+            # Aplicar spread y slippage
+            mid = px
+            spread_bps = float(thresholds.get("spread_bps", 5.0))
+            slippage_bps = float(thresholds.get("slippage_bps", 2.0))
+            if side_choice == 1:
+                # Long: entry en ask, exit en bid
+                entry_px = _apply_spread(mid, spread_bps, "ask")
+                exit_px = _apply_spread(mid, spread_bps, "bid")
+            else:
+                # Short: entry en bid, exit en ask
+                entry_px = _apply_spread(mid, spread_bps, "bid")
+                exit_px = _apply_spread(mid, spread_bps, "ask")
+
+            # Slippage
+            slip = (slippage_bps / 10000.0)
+            if side_choice == 1:
+                entry_px *= (1.0 + slip)
+                exit_px *= (1.0 - slip)
+            else:
+                entry_px *= (1.0 - slip)
+                exit_px *= (1.0 + slip)
+
+            # Redondeo a tick_size
+            tick_size = float(thresholds.get("tick_size", 0.0001))
+            entry_px = _round_to_tick(entry_px, tick_size)
+            exit_px = _round_to_tick(exit_px, tick_size)
+
+            # Sizing y redondeo a step_size
+            qty = 1.0  # placeholder
+            step_size = float(thresholds.get("step_size", 1.0))
+            qty = _round_to_step(qty, step_size)
+            if qty == 0.0:
+                continue
+
             dbg["can_enter"] += 1
             dbg["entered"] += 1
             if side_choice == 1:
@@ -445,7 +498,7 @@ def backtest_from_predictions_v71(
 
             in_pos = True
             side = side_choice
-            entry_px = px
+            entry_px = entry_px
             entry_i = i
             entered_ev.append(float(best_ev[i]))
 

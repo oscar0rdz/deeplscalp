@@ -704,15 +704,9 @@ def main() -> None:
             json.dump(met, f, indent=2)
 
         # Guardar trades auditables
-        if "trade_ret_raw" in diag:
-            trades = pd.DataFrame({
-                "ret_raw": diag["trade_ret_raw"],
-                "ret_net": diag.get("trade_ret_net", diag["trade_ret_raw"]),
-                "fee_per_trade": diag.get("fee_per_trade", 0.0),
-                "spread_per_trade": diag.get("spread_per_trade", 0.0),
-                "slip_per_trade": diag.get("slip_per_trade", 0.0),
-            })
-            trades.to_csv(fold_dir / "trades.csv", index=False)
+        if "trades_df" in diag:
+            trades_df = diag["trades_df"]
+            trades_df.to_csv(fold_dir / "trades.csv", index=False)
 
         all_fold_metrics.append({"fold": fold["fold_id"], **met})
 

@@ -7,6 +7,18 @@ data:
   time_col: ds
   strict_time: true
 
+sim:
+  # Realismo mínimo (ajusta con tu exchange real)
+  spread_bps: 5.0
+  slippage_bps: 2.0
+  fee_bps: 4.0
+  # Binance XRPUSDT típicamente tick=0.0001, step=1 (depende)
+  tick_size: 0.0001
+  step_size: 1.0
+  min_hold_bars: 1
+  # Si existe futures en tu sim: funding/liq (si no, ignora)
+  funding_bps_per_8h: 0.0
+
 features:
   seq_len: 128
 
