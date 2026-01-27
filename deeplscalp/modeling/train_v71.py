@@ -180,7 +180,8 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
     seq_len = int(cfg["features"]["seq_len"])
     mcfg = cfg["model"]
     tcfg = cfg["train"]
-    quantiles = [float(q) for q in mcfg["quantiles"]]
+    q_raw = mcfg.get("quantiles", [0.1, 0.5, 0.9])
+    quantiles = [float(q) for q in q_raw]
 
     # drop nan
     train_df = train_df.dropna()
