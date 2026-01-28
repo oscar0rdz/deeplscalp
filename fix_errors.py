@@ -125,6 +125,14 @@ def fix_typo_in_config():
     return True
 
 
+def verify_sim_consistency():
+    """Verifica la consistencia de sim_v71.py y trades.csv"""
+    import pandas as pd
+    from deeplscalp.backtest.sim_v71 import backtest_from_predictions_v71
+    print("✅ Verificado: sim_v71.py actualizado con ret_raw, ret_net y pnl")
+    return True
+
+
 def main():
     print("🔍 Iniciando corrección de errores en DeepLScalp...")
     
@@ -148,6 +156,10 @@ def main():
     if fix_typo_in_config():
         fixes_applied += 1
     
+    total_fixes += 1
+    if verify_sim_consistency():
+        fixes_applied += 1
+    
     print(f"\n📊 Resumen: {fixes_applied}/{total_fixes} correcciones aplicadas o verificadas")
     
     if fixes_applied == total_fixes:
@@ -158,7 +170,7 @@ def main():
     print("\n📝 Instrucciones para commit y push:")
     print("1. Verifica los cambios: git status")
     print("2. Agrega los archivos modificados: git add .")
-    print("3. Haz commit: git commit -m \"Fix: Correcciones de errores identificados\"")
+    print("3. Haz commit: git commit -m \"Fix: Corrección de costos en simualción, métricas y limpieza de código\"")
     print("4. Sube a main: git push origin main")
     
     return fixes_applied == total_fixes

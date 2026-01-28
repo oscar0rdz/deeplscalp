@@ -530,15 +530,18 @@ def backtest_from_predictions_v71(
                     notional = (ex / (entry_px + EPS)) - 1.0
                 else:
                     notional = (entry_px - ex) / (entry_px + EPS)
-                trade_ret = (notional * leverage * risk_fraction) - (cost_rt_notional * leverage * risk_fraction)
-                rets.append(trade_ret)
-                equity.append(equity[-1] * (1.0 + trade_ret))
+                # ret_raw = notional * leverage * risk_fraction
+                # ret_net = ret_raw - (cost_rt_notional * leverage * risk_fraction)
+                trade_ret_raw = notional * leverage * risk_fraction
+                trade_ret_net = trade_ret_raw - (cost_rt_notional * leverage * risk_fraction)
+                
+                rets.append(trade_ret_net)
+                equity.append(equity[-1] * (1.0 + trade_ret_net))
                 holds.append(bars_in)
                 # Record trade
                 ts_entry = df.index[entry_i]
                 ts_exit = df.index[i]
-                ret_raw = trade_ret + (cost_rt_notional * leverage * risk_fraction)  # raw before costs
-                ret_net = trade_ret
+                
                 fee = cost_rt_notional * leverage * risk_fraction * 0.5  # approx per side
                 spread = 0.0  # not detailed
                 slip = 0.0
@@ -549,8 +552,9 @@ def backtest_from_predictions_v71(
                     "side": "long" if side == 1 else "short",
                     "entry_price": entry_px,
                     "exit_price": ex,
-                    "ret_raw": ret_raw,
-                    "ret_net": ret_net,
+                    "ret_raw": trade_ret_raw,
+                    "ret_net": trade_ret_net,
+                    "pnl": trade_ret_net,  # compatibility alias
                     "fee": fee,
                     "slippage": slip,
                     "spread": spread,
@@ -570,15 +574,17 @@ def backtest_from_predictions_v71(
                     notional = (ex / (entry_px + EPS)) - 1.0
                 else:
                     notional = (entry_px - ex) / (entry_px + EPS)
-                trade_ret = (notional * leverage * risk_fraction) - (cost_rt_notional * leverage * risk_fraction)
-                rets.append(trade_ret)
-                equity.append(equity[-1] * (1.0 + trade_ret))
+                
+                trade_ret_raw = notional * leverage * risk_fraction
+                trade_ret_net = trade_ret_raw - (cost_rt_notional * leverage * risk_fraction)
+
+                rets.append(trade_ret_net)
+                equity.append(equity[-1] * (1.0 + trade_ret_net))
                 holds.append(bars_in)
                 # Record trade
                 ts_entry = df.index[entry_i]
                 ts_exit = df.index[i]
-                ret_raw = trade_ret + (cost_rt_notional * leverage * risk_fraction)
-                ret_net = trade_ret
+                
                 fee = cost_rt_notional * leverage * risk_fraction * 0.5
                 spread = 0.0
                 slip = 0.0
@@ -589,8 +595,9 @@ def backtest_from_predictions_v71(
                     "side": "long" if side == 1 else "short",
                     "entry_price": entry_px,
                     "exit_price": ex,
-                    "ret_raw": ret_raw,
-                    "ret_net": ret_net,
+                    "ret_raw": trade_ret_raw,
+                    "ret_net": trade_ret_net,
+                    "pnl": trade_ret_net,
                     "fee": fee,
                     "slippage": slip,
                     "spread": spread,
@@ -618,15 +625,17 @@ def backtest_from_predictions_v71(
                 notional = (sl_px / (entry_px + EPS)) - 1.0
             else:
                 notional = (entry_px - sl_px) / (entry_px + EPS)
-            trade_ret = (notional * leverage * risk_fraction) - (cost_rt_notional * leverage * risk_fraction)
-            rets.append(trade_ret)
-            equity.append(equity[-1] * (1.0 + trade_ret))
+            
+            trade_ret_raw = notional * leverage * risk_fraction
+            trade_ret_net = trade_ret_raw - (cost_rt_notional * leverage * risk_fraction)
+            
+            rets.append(trade_ret_net)
+            equity.append(equity[-1] * (1.0 + trade_ret_net))
             holds.append(bars_in)
             # Record trade
             ts_entry = df.index[entry_i]
             ts_exit = df.index[i]
-            ret_raw = trade_ret + (cost_rt_notional * leverage * risk_fraction)
-            ret_net = trade_ret
+            
             fee = cost_rt_notional * leverage * risk_fraction * 0.5
             spread = 0.0
             slip = 0.0
@@ -637,8 +646,9 @@ def backtest_from_predictions_v71(
                 "side": "long" if side == 1 else "short",
                 "entry_price": entry_px,
                 "exit_price": sl_px,
-                "ret_raw": ret_raw,
-                "ret_net": ret_net,
+                "ret_raw": trade_ret_raw,
+                "ret_net": trade_ret_net,
+                "pnl": trade_ret_net,
                 "fee": fee,
                 "slippage": slip,
                 "spread": spread,
@@ -655,15 +665,17 @@ def backtest_from_predictions_v71(
                 notional = (tp_px / (entry_px + EPS)) - 1.0
             else:
                 notional = (entry_px - tp_px) / (entry_px + EPS)
-            trade_ret = (notional * leverage * risk_fraction) - (cost_rt_notional * leverage * risk_fraction)
-            rets.append(trade_ret)
-            equity.append(equity[-1] * (1.0 + trade_ret))
+            
+            trade_ret_raw = notional * leverage * risk_fraction
+            trade_ret_net = trade_ret_raw - (cost_rt_notional * leverage * risk_fraction)
+            
+            rets.append(trade_ret_net)
+            equity.append(equity[-1] * (1.0 + trade_ret_net))
             holds.append(bars_in)
             # Record trade
             ts_entry = df.index[entry_i]
             ts_exit = df.index[i]
-            ret_raw = trade_ret + (cost_rt_notional * leverage * risk_fraction)
-            ret_net = trade_ret
+            
             fee = cost_rt_notional * leverage * risk_fraction * 0.5
             spread = 0.0
             slip = 0.0
@@ -674,8 +686,9 @@ def backtest_from_predictions_v71(
                 "side": "long" if side == 1 else "short",
                 "entry_price": entry_px,
                 "exit_price": tp_px,
-                "ret_raw": ret_raw,
-                "ret_net": ret_net,
+                "ret_raw": trade_ret_raw,
+                "ret_net": trade_ret_net,
+                "pnl": trade_ret_net,
                 "fee": fee,
                 "slippage": slip,
                 "spread": spread,
@@ -702,6 +715,11 @@ def backtest_from_predictions_v71(
         diag["trade_ret_raw"] = r.copy()
         diag["trade_ret_net"] = r_net.copy()
         r = r_net
+    else:
+        # Si no hay cfg detallado, de todos modos asegura diag
+        rets_arr = np.array(rets)
+        diag["trade_ret_raw"] = rets_arr + (cost_rt_notional * leverage * risk_fraction)
+        diag["trade_ret_net"] = rets_arr
 
     eq = np.asarray(equity, dtype=np.float64)
 
@@ -762,6 +780,7 @@ def backtest_from_predictions_v71(
         "entered_ev_median": float(np.median(entered_ev)) if entered_ev else 0.0,
         "trades_df": trades_df,
         "equity_df": equity_df,
+        "equity": eq, # alias for compute_objective
         "dbg": dbg,
     })
 
