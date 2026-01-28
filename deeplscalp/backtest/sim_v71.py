@@ -723,8 +723,19 @@ def backtest_from_predictions_v71(
 
     eq = np.asarray(equity, dtype=np.float64)
 
-    # Build trades_df
-    trades_df = pd.DataFrame(trades_list)
+    # --- PATCH: ensure pnl exists (used by tuner/objective) ---
+    if not trades_list:
+        trades_df = pd.DataFrame(columns=["ts_entry", "ts_exit", "side", "entry_price", "exit_price", "ret_raw", "ret_net", "pnl"])
+    else:
+        trades_df = pd.DataFrame(trades_list)
+        if "pnl" not in trades_df.columns:
+            if "ret_net" in trades_df.columns:
+                trades_df["pnl"] = trades_df["ret_net"].astype("float64")
+            elif "ret_raw" in trades_df.columns:
+                trades_df["pnl"] = trades_df["ret_raw"].astype("float64")
+            else:
+                trades_df["pnl"] = 0.0
+    # ---------------------------------------------------------
 
     # Build equity_df: ts, equity, dd, position
     # Since equity is at trade exits, we need to build per bar

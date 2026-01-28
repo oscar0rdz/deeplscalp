@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -33,7 +34,31 @@ def audit_fold(fold_dir: Path, fail: bool = True) -> dict:
     else:
         df = pd.read_csv(trades_path)
 
-    required = {"entry_price","exit_price","pnl"}
+    cols = set(df.columns)
+    has_any_pnl = ("pnl" in cols) or ("ret_net" in cols) or ("ret_raw" in cols)
+    
+    if not has_any_pnl:
+        msg = "[FAIL] trades: falta pnl y no hay ret_net/ret_raw (no se puede evaluar)"
+        print(msg)
+        if fail:
+            return {"fold": fold_dir.name, "ok": False, "error": msg, "exit_code": 2}
+        return {"fold": fold_dir.name, "ok": False, "error": msg}
+
+    if "pnl" not in cols:
+        msg = "[FAIL] trades: falta columna pnl (aunque exista ret_net/ret_raw)"
+        print(msg)
+        if fail:
+            # Obliga pnl explícito según recomendación
+            return {"fold": fold_dir.name, "ok": False, "error": msg, "exit_code": 3}
+        
+    # fallback para el resto del script si falta pnl
+    if "pnl" not in cols:
+        if "ret_net" in cols:
+            df["pnl"] = df["ret_net"]
+        else:
+            df["pnl"] = df["ret_raw"]
+
+    required = {"entry_price", "exit_price", "pnl"}
     missing = required - set(df.columns)
     if missing:
         msg = f"[AUDIT] Trades sin columnas {missing} en {trades_path}"
@@ -99,8 +124,17 @@ def main():
         raise SystemExit(f"[AUDIT] No hay fold_* en {base}")
 
     out = []
+    has_critical_error = False
     for fd in folds:
-        out.append(audit_fold(fd, fail=args.fail))
+        res = audit_fold(fd, fail=args.fail)
+        out.append(res)
+        if res.get("exit_code"):
+            has_critical_error = True
+            critical_code = res["exit_code"]
+
+    if has_critical_error and args.fail:
+        print(f"[AUDIT] FAIL FAST: Critical error detected.")
+        sys.exit(critical_code)
 
     out_path = base / "audit_summary.json"
     out_path.write_text(json.dumps(out, indent=2))

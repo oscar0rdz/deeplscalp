@@ -90,8 +90,26 @@ from deeplscalp.backtest.sim_v71 import (backtest_from_predictions_v71,
 from deeplscalp.modeling.calibration_v71 import (apply_temperature_multiclass,
                                                  fit_temperature_multiclass)
 from deeplscalp.modeling.train_v71 import predict_v71, train_model_v71
-from deeplscalp.tuning.objective_v72 import robust_objective_v2
 from deeplscalp.utils.metrics import max_drawdown, profit_factor
+
+
+def _ensure_pnl(df):
+    if df is None or df.empty:
+        # returns dummy empty df with pnl
+        return pd.DataFrame(columns=["pnl"])
+    if "pnl" in df.columns:
+        return df
+    if "ret_net" in df.columns:
+        df = df.copy()
+        df["pnl"] = df["ret_net"].astype("float64")
+        return df
+    if "ret_raw" in df.columns:
+        df = df.copy()
+        df["pnl"] = df["ret_raw"].astype("float64")
+        return df
+    df = df.copy()
+    df["pnl"] = 0.0
+    return df
 
 
 def compute_objective(pnls, equity_curve, n_trades, cfg):
@@ -414,11 +432,27 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
 
         met, diag = backtest_from_predictions_v71(pred_val, cfg, thresholds)
 
-        ntr = int(_pick(met, ["ntr_x2", "n_trades_x2", "n_trades"], 0))
-        trade_rets = diag.get("trade_ret_raw", np.array([]))
-        equity_curve = diag.get("equity", [1.0])
+        # --- PATCH: robust scoring fallback ---
+        trades_df = diag.get("trades_df")
+        trades_df = _ensure_pnl(trades_df)
+        pnl = pd.to_numeric(trades_df["pnl"], errors="coerce").fillna(0.0).to_numpy()
 
-        obj_score, pf, mdd, equity_final = compute_objective(trade_rets, equity_curve, ntr, cfg)
+        gross_profit = pnl[pnl > 0].sum()
+        gross_loss = (-pnl[pnl < 0]).sum()
+
+        eps = 1e-12
+        # pf_raw = (gross_profit / max(gross_loss, eps)) if gross_loss > eps else float("nan")
+        net = float(pnl.sum())
+
+        # equity curve para MDD (si tu MDD hoy sale 0 por no tener equity):
+        equity_curve = np.cumsum(pnl)
+        # --------------------------------------
+
+        ntr = int(_pick(met, ["ntr_x2", "n_trades_x2", "n_trades"], 0))
+        # trade_rets = diag.get("trade_ret_raw", np.array([]))
+        # equity_curve = diag.get("equity", [1.0])
+
+        obj_score, pf, mdd, equity_final = compute_objective(pnl, equity_curve, ntr, cfg)
 
         print(f"[tuner] pf_raw={pf.pf_raw:.3f} pf_capped={pf.pf_capped:.3f} mdd={mdd:.3f} ntr={ntr} net={equity_final-1:.3f} obj={obj_score:.3f}")
         return float(obj_score)
