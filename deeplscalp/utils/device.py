@@ -10,15 +10,19 @@ def set_torch_threads(n: int) -> None:
         pass
 
 
-def pick_device(cfg_device: str) -> str:
-    if cfg_device != "auto":
-        return cfg_device
+def pick_device(cfg_device: str = "auto") -> torch.device:
+    """
+    Selecciona el mejor dispositivo disponible (CUDA > MPS > CPU).
+    """
+    if cfg_device != "auto" and cfg_device is not None:
+        return torch.device(cfg_device)
 
     if torch.cuda.is_available():
-        return "cuda"
+        return torch.device("cuda")
 
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        # MPS fallback ayuda con operaciones no soportadas
         os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-        return "mps"
+        return torch.device("mps")
 
-    return "cpu"
+    return torch.device("cpu")

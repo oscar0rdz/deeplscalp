@@ -54,37 +54,26 @@ DeepLScalp/
 - Gestión de posiciones con TP/SL dinámicos
 - Filtrado por condiciones de mercado y calidad de señales
 
-## Errores Identificados
+### 1. Problemas de Código Duplicado (Corregido)
 
-### 1. Problemas de Código Duplicado
+- **Estado**: ✅ Corregido. Se eliminó la función duplicada `backtest_from_predictions_v7` en `deeplscalp/backtest/sim.py`.
 
-- **Ubicación**: `deeplscalp/backtest/sim.py` contiene dos funciones idénticas `backtest_from_predictions_v7`
-- **Impacto**: Dificulta el mantenimiento y puede introducir inconsistencias
-- **Solución**: Eliminar la función duplicada y mantener una única implementación
+### 2. Manejo Incorrecto de Dispositivos (Kaggle/MPS/CUDA)
 
-### 2. Manejo Incorrecto de CUDA
+- **Estado**: ✅ Mejorado. Se centralizó la lógica en `deeplscalp/utils/device.py` para detectar CUDA, MPS (Mac) y CPU automáticamente.
+- **Impacto**: Mayor portabilidad entre diferentes entornos de hardware.
 
-- **Ubicación**: Varias partes del código usan `.cuda()` sin verificar disponibilidad
-- **Impacto**: El código fallará en sistemas sin GPU
-- **Solución**: Usar `torch.device` para manejar dispositivos de forma flexible
+### 3. Error Crítico de Acceso a Configuración (Nuevo)
 
-### 3. Inconsistencias en Tipos de Datos Numéricos
+- **Ubicación**: `deeplscalp/modeling/train_v71.py`
+- **Impacto**: El entrenamiento fallaba al activarse el Early Stopping por intentar acceder a un diccionario como si fuera un objeto con atributos.
+- **Solución**: ✅ Corregido cambiando accesos `.attr` por `["key"]`.
 
-- **Ubicación**: Algunas funciones usan tipos mixtos (float32, float64)
-- **Impacto**: Puede causar problemas de rendimiento y precisión
-- **Solución**: Establecer convenciones claras de tipos de datos
+### 4. Pipeline de Evaluación Incompleto (Nuevo)
 
-### 4. Errores en el Pipeline de Entrenamiento
-
-- **Ubicación**: `deeplscalp/modeling/train_v71.py` línea final tiene `return out.sort_index()` duplicado
-- **Impacto**: Puede causar problemas de ejecución
-- **Solución**: Eliminar la línea duplicada
-
-### 5. Configuración Inflexible
-
-- **Ubicación**: Algunas configuraciones están hardcodeadas en lugar de ser parametrizables
-- **Impacto**: Dificulta la experimentación y ajuste fino
-- **Solución**: Centralizar todas las configuraciones en archivos YAML
+- **Ubicación**: `evaluation/run_full_pipeline.py`
+- **Impacto**: No detectaba GPUs Nvidia, limitando el rendimiento en servidores.
+- **Solución**: ✅ Corregido actualizando la lógica de `device_auto()`.
 
 ## Mejoras Recomendadas
 

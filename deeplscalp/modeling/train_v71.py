@@ -298,14 +298,15 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
         return w
 
     def early_stop(val_loss, best_val, bad_epochs, cfg):
-        min_rel_improve = float(getattr(cfg.train, "min_rel_improve", 0.005))
+        tcfg = cfg.get("train", {})
+        min_rel_improve = float(tcfg.get("min_rel_improve", 0.005))
         improved = val_loss < best_val * (1.0 - min_rel_improve)
         if improved:
             best_val = val_loss
             bad_epochs = 0
         else:
             bad_epochs += 1
-        return bad_epochs >= int(cfg.train.patience), best_val, bad_epochs
+        return bad_epochs >= int(tcfg.get("early_stop_patience", 7)), best_val, bad_epochs
 
     def train_step(X, y_side, ycL, ycS, yL, yS, y_reg, y_evt, sw, is_evt):
         opt.zero_grad(set_to_none=True)
@@ -334,7 +335,7 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
             amp_scaler.scale(loss).backward()
 
         # grad clip real (no solo declarado en YAML)
-        grad_clip_val = float(getattr(tcfg, "grad_clip", 0.0) or 0.0)
+        grad_clip_val = float(tcfg.get("grad_clip", 0.0) or 0.0)
         if grad_clip_val > 0:
             if amp_scaler is None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_val)
