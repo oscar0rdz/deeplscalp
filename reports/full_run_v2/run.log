@@ -1,0 +1,162 @@
+[cpu] torch threads=8
+[device] cpu
+[ohlcv_merge] merged: close_nonnull=100.00% volume_nonnull=100.00% | path=artifacts/datasets/ohlcv_ETH_USDT_5m.parquet
+[events] keep_train_rows=50.00% (event + background) | edge_thr≈0.00150 cost_rt≈0.00130
+[dataset] rows=524,731 features=18
+
+=== FOLD 0 ===
+train: 2021-01-01 04:00:00+00:00 -> 2021-06-30 03:55:00+00:00 | n=51721
+val  : 2021-06-30 04:00:00+00:00 -> 2021-08-19 03:55:00+00:00 | n=14346
+test : 2021-08-19 04:00:00+00:00 -> 2021-10-08 03:55:00+00:00 | n=14376
+[fold 0] ep 1 loss train=0.025523 val=0.007118
+[fold 0] ep 2 loss train=0.010814 val=0.006668
+[fold 0] ep 3 loss train=0.009036 val=0.005496
+[fold 0] ep 4 loss train=0.008262 val=0.004885
+[fold 0] ep 5 loss train=0.007831 val=0.005269
+[fold 0] ep 6 loss train=0.007685 val=0.004733
+[fold 0] ep 7 loss train=0.007340 val=0.004953
+[fold 0] ep 8 loss train=0.007233 val=0.004721
+[fold 0] ep 9 loss train=0.007130 val=0.004697
+[fold 0] ep 10 loss train=0.007067 val=0.004702
+[fold 0] ep 11 loss train=0.007013 val=0.004645
+[fold 0] ep 12 loss train=0.006973 val=0.004638
+[fold 0] ep 13 loss train=0.006976 val=0.004627
+[fold 0] ep 14 loss train=0.006912 val=0.004642
+[fold 0] ep 15 loss train=0.006891 val=0.004643
+[fold 0] ep 16 loss train=0.006878 val=0.004690
+[fold 0] ep 17 loss train=0.006858 val=0.004630
+[fold 0] ep 18 loss train=0.006858 val=0.004729
+[fold 0] ep 19 loss train=0.006834 val=0.004682
+[fold 0] early stop at ep=19
+[I 2025-12-30 12:49:58,348] A new study created in memory with name: no-name-e6b54791-8b7d-4dcf-a9e3-4fbdb14a4433
+[optuna] trades=12 tpd=0.2 pf=0.379 mdd=0.022 wr=0.583 net=0.979 score=-2908.821
+[I 2025-12-30 12:49:58,400] Trial 0 finished with value: -2908.8208245160904 and parameters: {'enter_q50_pct': 0.8323988261464197, 'enter_q10_pct': 0.3352142919229748, 'exit_q50_pct': 0.3793972738151323, 'ood_pct': 0.9338121877875851, 'cooldown_bars': 0}. Best is trial 0 with value: -2908.8208245160904.
+[optuna] trades=75 tpd=1.5 pf=0.328 mdd=0.153 wr=0.507 net=0.854 score=-3347.774
+[I 2025-12-30 12:49:58,716] Trial 1 finished with value: -3347.7738062138314 and parameters: {'enter_q50_pct': 0.7843187944739646, 'enter_q10_pct': 0.06742508365045984, 'exit_q50_pct': 0.4397792655987208, 'ood_pct': 0.9341561016440492, 'cooldown_bars': 2}. Best is trial 0 with value: -2908.8208245160904.
+[optuna] trades=11 tpd=0.2 pf=0.461 mdd=0.016 wr=0.636 net=0.985 score=-2883.192
+[I 2025-12-30 12:49:58,823] Trial 2 finished with value: -2883.1915210579696 and parameters: {'enter_q50_pct': 0.7545285887450766, 'enter_q10_pct': 0.34097295564859825, 'exit_q50_pct': 0.4245991883601898, 'ood_pct': 0.8797274754949587, 'cooldown_bars': 0}. Best is trial 2 with value: -2883.1915210579696.
+[optuna] trades=45 tpd=0.9 pf=0.216 mdd=0.125 wr=0.444 net=0.878 score=-2962.740
+[I 2025-12-30 12:49:58,929] Trial 3 finished with value: -2962.739595856504 and parameters: {'enter_q50_pct': 0.7903489921677554, 'enter_q10_pct': 0.14127267288786133, 'exit_q50_pct': 0.28614039423450705, 'ood_pct': 0.9104723026098962, 'cooldown_bars': 1}. Best is trial 2 with value: -2883.1915210579696.
+[optuna] trades=49 tpd=1.0 pf=0.225 mdd=0.129 wr=0.449 net=0.871 score=-3090.032
+[I 2025-12-30 12:49:59,036] Trial 4 finished with value: -3090.032134429528 and parameters: {'enter_q50_pct': 0.8846076368389235, 'enter_q10_pct': 0.09184815819561255, 'exit_q50_pct': 0.1814650918408482, 'ood_pct': 0.9012906580611169, 'cooldown_bars': 1}. Best is trial 2 with value: -2883.1915210579696.
+[optuna] trades=57 tpd=1.2 pf=0.201 mdd=0.159 wr=0.439 net=0.844 score=-3683.605
+[I 2025-12-30 12:49:59,143] Trial 5 finished with value: -3683.604544984603 and parameters: {'enter_q50_pct': 0.9227387115064629, 'enter_q10_pct': 0.10990213464750792, 'exit_q50_pct': 0.28140549728612524, 'ood_pct': 0.9329380396406859, 'cooldown_bars': 0}. Best is trial 2 with value: -2883.1915210579696.
+[optuna] trades=68 tpd=1.4 pf=0.216 mdd=0.201 wr=0.441 net=0.804 score=-4573.506
+[I 2025-12-30 12:49:59,250] Trial 6 finished with value: -4573.506211511578 and parameters: {'enter_q50_pct': 0.8836598674183165, 'enter_q10_pct': 0.10115723710618746, 'exit_q50_pct': 0.0792732168433758, 'ood_pct': 0.9828439752154666, 'cooldown_bars': 3}. Best is trial 2 with value: -2883.1915210579696.
+[optuna] trades=49 tpd=1.0 pf=0.183 mdd=0.148 wr=0.408 net=0.853 score=-3517.765
+[I 2025-12-30 12:49:59,358] Trial 7 finished with value: -3517.7653864688364 and parameters: {'enter_q50_pct': 0.9278474165856214, 'enter_q10_pct': 0.1413841307520112, 'exit_q50_pct': 0.09395245130287275, 'ood_pct': 0.9457926237117019, 'cooldown_bars': 1}. Best is trial 2 with value: -2883.1915210579696.
+[optuna] trades=28 tpd=0.6 pf=0.187 mdd=0.090 wr=0.429 net=0.911 score=-2535.213
+[I 2025-12-30 12:49:59,464] Trial 8 finished with value: -2535.213258432952 and parameters: {'enter_q50_pct': 0.7768484116658514, 'enter_q10_pct': 0.19855307303338104, 'exit_q50_pct': 0.06547483450184828, 'ood_pct': 0.9773048562910295, 'cooldown_bars': 1}. Best is trial 8 with value: -2535.213258432952.
+[optuna] trades=47 tpd=0.9 pf=0.198 mdd=0.138 wr=0.426 net=0.865 score=-3260.603
+[I 2025-12-30 12:49:59,570] Trial 9 finished with value: -3260.603262678805 and parameters: {'enter_q50_pct': 0.895754902557876, 'enter_q10_pct': 0.14351332282682328, 'exit_q50_pct': 0.28403060953001485, 'ood_pct': 0.9265394391080591, 'cooldown_bars': 0}. Best is trial 8 with value: -2535.213258432952.
+[optuna] trades=21 tpd=0.4 pf=0.208 mdd=0.064 wr=0.476 net=0.937 score=-2784.510
+[I 2025-12-30 12:49:59,698] Trial 10 finished with value: -2784.5100903964785 and parameters: {'enter_q50_pct': 0.8323986670687712, 'enter_q10_pct': 0.2591715326995483, 'exit_q50_pct': 0.16558684745833, 'ood_pct': 0.9836956227319914, 'cooldown_bars': 2}. Best is trial 8 with value: -2535.213258432952.
+[optuna] trades=22 tpd=0.4 pf=0.240 mdd=0.061 wr=0.500 net=0.940 score=-2595.682
+[I 2025-12-30 12:49:59,812] Trial 11 finished with value: -2595.681739030959 and parameters: {'enter_q50_pct': 0.8256508597048633, 'enter_q10_pct': 0.2484681207677594, 'exit_q50_pct': 0.15963694986543076, 'ood_pct': 0.9858069645686325, 'cooldown_bars': 2}. Best is trial 8 with value: -2535.213258432952.
+[optuna] trades=24 tpd=0.5 pf=0.244 mdd=0.066 wr=0.500 net=0.935 score=-2449.512
+[I 2025-12-30 12:49:59,929] Trial 12 finished with value: -2449.5122743649226 and parameters: {'enter_q50_pct': 0.8272436110708438, 'enter_q10_pct': 0.22241200310193174, 'exit_q50_pct': 0.17203067907442465, 'ood_pct': 0.9646765430523964, 'cooldown_bars': 3}. Best is trial 12 with value: -2449.5122743649226.
+[optuna] trades=24 tpd=0.5 pf=0.244 mdd=0.066 wr=0.500 net=0.935 score=-2449.512
+[I 2025-12-30 12:50:00,057] Trial 13 finished with value: -2449.5122743649226 and parameters: {'enter_q50_pct': 0.7874571323522446, 'enter_q10_pct': 0.22029010338041194, 'exit_q50_pct': 0.05556415851234578, 'ood_pct': 0.9623354115685324, 'cooldown_bars': 3}. Best is trial 12 with value: -2449.5122743649226.
+[optuna] trades=24 tpd=0.5 pf=0.248 mdd=0.065 wr=0.500 net=0.935 score=-2442.610
+[I 2025-12-30 12:50:00,174] Trial 14 finished with value: -2442.609725825301 and parameters: {'enter_q50_pct': 0.8149716617003048, 'enter_q10_pct': 0.22626048035056315, 'exit_q50_pct': 0.19651596355307582, 'ood_pct': 0.9587879763639043, 'cooldown_bars': 3}. Best is trial 14 with value: -2442.609725825301.
+[optuna] trades=18 tpd=0.4 pf=0.131 mdd=0.069 wr=0.389 net=0.931 score=-3310.695
+[I 2025-12-30 12:50:00,290] Trial 15 finished with value: -3310.6951338838235 and parameters: {'enter_q50_pct': 0.9624528065972342, 'enter_q10_pct': 0.28779263297234825, 'exit_q50_pct': 0.20425967971984232, 'ood_pct': 0.9537102641915048, 'cooldown_bars': 3}. Best is trial 14 with value: -2442.609725825301.
+[optuna] trades=31 tpd=0.6 pf=0.223 mdd=0.093 wr=0.452 net=0.908 score=-2336.677
+[I 2025-12-30 12:50:00,405] Trial 16 finished with value: -2336.6773095963554 and parameters: {'enter_q50_pct': 0.8486682357027087, 'enter_q10_pct': 0.18743958521002033, 'exit_q50_pct': 0.21862888753639323, 'ood_pct': 0.9652641845645263, 'cooldown_bars': 3}. Best is trial 16 with value: -2336.6773095963554.
+[optuna] trades=25 tpd=0.5 pf=0.245 mdd=0.072 wr=0.480 net=0.929 score=-2474.720
+[I 2025-12-30 12:50:00,520] Trial 17 finished with value: -2474.7197538408254 and parameters: {'enter_q50_pct': 0.8515090646871153, 'enter_q10_pct': 0.18099467040958517, 'exit_q50_pct': 0.23985744924336275, 'ood_pct': 0.8694337972573623, 'cooldown_bars': 2}. Best is trial 16 with value: -2336.6773095963554.
+[optuna] trades=32 tpd=0.6 pf=0.232 mdd=0.093 wr=0.438 net=0.908 score=-2323.206
+[I 2025-12-30 12:50:00,637] Trial 18 finished with value: -2323.205956312567 and parameters: {'enter_q50_pct': 0.8618535326945882, 'enter_q10_pct': 0.17700695688562978, 'exit_q50_pct': 0.3378408692663435, 'ood_pct': 0.9503972906624084, 'cooldown_bars': 3}. Best is trial 18 with value: -2323.205956312567.
+[optuna] trades=25 tpd=0.5 pf=0.323 mdd=0.063 wr=0.520 net=0.941 score=-2175.291
+[I 2025-12-30 12:50:00,752] Trial 19 finished with value: -2175.291254114441 and parameters: {'enter_q50_pct': 0.858196866695984, 'enter_q10_pct': 0.18408134007304763, 'exit_q50_pct': 0.3467460331593652, 'ood_pct': 0.851538486494128, 'cooldown_bars': 3}. Best is trial 19 with value: -2175.291254114441.
+[optuna] trades=34 tpd=0.7 pf=0.263 mdd=0.086 wr=0.500 net=0.915 score=-2155.365
+[I 2025-12-30 12:50:00,871] Trial 20 finished with value: -2155.36509054061 and parameters: {'enter_q50_pct': 0.8670977787017072, 'enter_q10_pct': 0.1658507027975419, 'exit_q50_pct': 0.35174531417219895, 'ood_pct': 0.8894338311037118, 'cooldown_bars': 2}. Best is trial 20 with value: -2155.36509054061.
+[optuna] trades=29 tpd=0.6 pf=0.303 mdd=0.072 wr=0.517 net=0.932 score=-1892.364
+[I 2025-12-30 12:50:00,988] Trial 21 finished with value: -1892.363849781295 and parameters: {'enter_q50_pct': 0.8701575833997645, 'enter_q10_pct': 0.16554327953443143, 'exit_q50_pct': 0.34630465882863876, 'ood_pct': 0.8504433409424115, 'cooldown_bars': 2}. Best is trial 21 with value: -1892.363849781295.
+[optuna] trades=29 tpd=0.6 pf=0.303 mdd=0.072 wr=0.517 net=0.932 score=-1892.364
+[I 2025-12-30 12:50:01,111] Trial 22 finished with value: -1892.363849781295 and parameters: {'enter_q50_pct': 0.8692286487758356, 'enter_q10_pct': 0.1621817611367052, 'exit_q50_pct': 0.3499410376884735, 'ood_pct': 0.8507410979241187, 'cooldown_bars': 2}. Best is trial 21 with value: -1892.363849781295.
+[optuna] trades=31 tpd=0.6 pf=0.226 mdd=0.086 wr=0.484 net=0.915 score=-2171.965
+[I 2025-12-30 12:50:01,228] Trial 23 finished with value: -2171.965361737548 and parameters: {'enter_q50_pct': 0.9069473433801656, 'enter_q10_pct': 0.15556269617938526, 'exit_q50_pct': 0.38922631555396886, 'ood_pct': 0.8523815460074439, 'cooldown_bars': 2}. Best is trial 21 with value: -1892.363849781295.
+[optuna] trades=38 tpd=0.8 pf=0.238 mdd=0.100 wr=0.474 net=0.903 score=-2400.217
+[I 2025-12-30 12:50:01,346] Trial 24 finished with value: -2400.2172281476855 and parameters: {'enter_q50_pct': 0.8759373025542797, 'enter_q10_pct': 0.12201207136489525, 'exit_q50_pct': 0.4975004349282627, 'ood_pct': 0.8838198358209043, 'cooldown_bars': 2}. Best is trial 21 with value: -1892.363849781295.
+[BEST] fold=0 value=-1892.363850 thresholds={'enter_q50_min': 0.00131, 'enter_q10_min': -0.009142921698484312, 'exit_q50_below': 0.0001099164416862527, 'ood_thr': 0.01820425055304118, 'cooldown_bars': 2}
+[fold 0] TEST metrics: {'n_trades': 14.0, 'profit_factor': 0.5268125956893263, 'max_drawdown': 0.020494004599296956, 'winrate': 0.5714285714285714, 'net_ret': 0.9860225993733605, 'avg_ret_per_trade': -0.0009978742925061286, 'median_ret_per_trade': 0.0009957894897954745} | diag: {'n_trades': 14, 'mean_ret': -0.0009978742925061286, 'cost_rt': 0.0013, 'avg_hold_bars': 4.928571428571429, 'avg_iqr_entry': 0.01700679212808609}
+
+=== FOLD 1 ===
+train: 2021-01-01 04:00:00+00:00 -> 2021-07-30 03:55:00+00:00 | n=60361
+val  : 2021-07-30 04:00:00+00:00 -> 2021-09-18 03:55:00+00:00 | n=14346
+test : 2021-09-18 04:00:00+00:00 -> 2021-11-07 03:55:00+00:00 | n=14376
+[fold 1] ep 1 loss train=0.029532 val=0.006130
+[fold 1] ep 2 loss train=0.010981 val=0.005556
+[fold 1] ep 3 loss train=0.009258 val=0.005211
+[fold 1] ep 4 loss train=0.008317 val=0.005333
+[fold 1] ep 5 loss train=0.007814 val=0.004777
+[fold 1] ep 6 loss train=0.007498 val=0.004643
+[fold 1] ep 7 loss train=0.007334 val=0.004513
+[fold 1] ep 8 loss train=0.007068 val=0.004657
+[fold 1] ep 9 loss train=0.006994 val=0.004520
+[fold 1] ep 10 loss train=0.006849 val=0.004672
+[fold 1] ep 11 loss train=0.006832 val=0.004700
+[fold 1] ep 12 loss train=0.006721 val=0.004548
+[fold 1] ep 13 loss train=0.006699 val=0.004607
+[fold 1] early stop at ep=13
+[I 2025-12-30 14:05:40,297] A new study created in memory with name: no-name-d2ae3953-310e-4ae5-a2bd-c3d0577d664f
+[optuna] trades=2 tpd=0.0 pf=0.225 mdd=0.008 wr=0.500 net=0.994 score=-3835.873
+[I 2025-12-30 14:05:40,344] Trial 0 finished with value: -3835.8727129248746 and parameters: {'enter_q50_pct': 0.8323988261464197, 'enter_q10_pct': 0.3352142919229748, 'exit_q50_pct': 0.3793972738151323, 'ood_pct': 0.9338121877875851, 'cooldown_bars': 0}. Best is trial 0 with value: -3835.8727129248746.
+[optuna] trades=81 tpd=1.6 pf=0.491 mdd=0.115 wr=0.593 net=0.895 score=-2320.637
+[I 2025-12-30 14:05:40,730] Trial 1 finished with value: -2320.6369927062306 and parameters: {'enter_q50_pct': 0.7843187944739646, 'enter_q10_pct': 0.06742508365045984, 'exit_q50_pct': 0.4397792655987208, 'ood_pct': 0.9341561016440492, 'cooldown_bars': 2}. Best is trial 1 with value: -2320.6369927062306.
+[optuna] trades=2 tpd=0.0 pf=0.225 mdd=0.008 wr=0.500 net=0.994 score=-3835.873
+[I 2025-12-30 14:05:40,841] Trial 2 finished with value: -3835.8727129248746 and parameters: {'enter_q50_pct': 0.7545285887450766, 'enter_q10_pct': 0.34097295564859825, 'exit_q50_pct': 0.4245991883601898, 'ood_pct': 0.8797274754949587, 'cooldown_bars': 0}. Best is trial 1 with value: -2320.6369927062306.
+[optuna] trades=32 tpd=0.6 pf=0.498 mdd=0.044 wr=0.594 net=0.956 score=-1151.870
+[I 2025-12-30 14:05:40,951] Trial 3 finished with value: -1151.870207688625 and parameters: {'enter_q50_pct': 0.7903489921677554, 'enter_q10_pct': 0.14127267288786133, 'exit_q50_pct': 0.28614039423450705, 'ood_pct': 0.9104723026098962, 'cooldown_bars': 1}. Best is trial 3 with value: -1151.870207688625.
+[optuna] trades=38 tpd=0.8 pf=0.420 mdd=0.067 wr=0.526 net=0.936 score=-1616.627
+[I 2025-12-30 14:05:41,062] Trial 4 finished with value: -1616.6265192027815 and parameters: {'enter_q50_pct': 0.8846076368389235, 'enter_q10_pct': 0.09184815819561255, 'exit_q50_pct': 0.1814650918408482, 'ood_pct': 0.9012906580611169, 'cooldown_bars': 1}. Best is trial 3 with value: -1151.870207688625.
+[optuna] trades=57 tpd=1.2 pf=0.556 mdd=0.072 wr=0.596 net=0.936 score=-1497.227
+[I 2025-12-30 14:05:41,181] Trial 5 finished with value: -1497.2266517867884 and parameters: {'enter_q50_pct': 0.9227387115064629, 'enter_q10_pct': 0.10990213464750792, 'exit_q50_pct': 0.28140549728612524, 'ood_pct': 0.9329380396406859, 'cooldown_bars': 0}. Best is trial 3 with value: -1151.870207688625.
+[optuna] trades=66 tpd=1.3 pf=0.411 mdd=0.114 wr=0.500 net=0.890 score=-2546.128
+[I 2025-12-30 14:05:41,293] Trial 6 finished with value: -2546.128078488287 and parameters: {'enter_q50_pct': 0.8836598674183165, 'enter_q10_pct': 0.10115723710618746, 'exit_q50_pct': 0.0792732168433758, 'ood_pct': 0.9828439752154666, 'cooldown_bars': 3}. Best is trial 3 with value: -1151.870207688625.
+[optuna] trades=39 tpd=0.8 pf=0.476 mdd=0.054 wr=0.538 net=0.946 score=-1366.788
+[I 2025-12-30 14:05:41,404] Trial 7 finished with value: -1366.7875916307207 and parameters: {'enter_q50_pct': 0.9278474165856214, 'enter_q10_pct': 0.1413841307520112, 'exit_q50_pct': 0.09395245130287275, 'ood_pct': 0.9457926237117019, 'cooldown_bars': 1}. Best is trial 3 with value: -1151.870207688625.
+[optuna] trades=13 tpd=0.3 pf=0.746 mdd=0.015 wr=0.615 net=0.993 score=-2411.047
+[I 2025-12-30 14:05:41,514] Trial 8 finished with value: -2411.047453388517 and parameters: {'enter_q50_pct': 0.7768484116658514, 'enter_q10_pct': 0.19855307303338104, 'exit_q50_pct': 0.06547483450184828, 'ood_pct': 0.9773048562910295, 'cooldown_bars': 1}. Best is trial 3 with value: -1151.870207688625.
+[optuna] trades=36 tpd=0.7 pf=0.511 mdd=0.046 wr=0.611 net=0.954 score=-1174.563
+[I 2025-12-30 14:05:41,625] Trial 9 finished with value: -1174.5632515373836 and parameters: {'enter_q50_pct': 0.895754902557876, 'enter_q10_pct': 0.14351332282682328, 'exit_q50_pct': 0.28403060953001485, 'ood_pct': 0.9265394391080591, 'cooldown_bars': 0}. Best is trial 3 with value: -1151.870207688625.
+[optuna] trades=2 tpd=0.0 pf=0.225 mdd=0.008 wr=0.500 net=0.994 score=-3835.873
+[I 2025-12-30 14:05:41,745] Trial 10 finished with value: -3835.8727129248746 and parameters: {'enter_q50_pct': 0.8302516805804365, 'enter_q10_pct': 0.2599625029764792, 'exit_q50_pct': 0.1967385186931856, 'ood_pct': 0.8525146625860748, 'cooldown_bars': 2}. Best is trial 3 with value: -1151.870207688625.
+[optuna] trades=17 tpd=0.3 pf=0.665 mdd=0.015 wr=0.647 net=0.987 score=-2049.882
+[I 2025-12-30 14:05:41,864] Trial 11 finished with value: -2049.882208991733 and parameters: {'enter_q50_pct': 0.8362754838355291, 'enter_q10_pct': 0.17374907194074304, 'exit_q50_pct': 0.296906532147106, 'ood_pct': 0.8992402577112916, 'cooldown_bars': 0}. Best is trial 3 with value: -1151.870207688625.
+[optuna] trades=5 tpd=0.1 pf=1.522 mdd=0.008 wr=0.800 net=1.004 score=-3246.661
+[I 2025-12-30 14:05:41,983] Trial 12 finished with value: -3246.660987145771 and parameters: {'enter_q50_pct': 0.9662187395796774, 'enter_q10_pct': 0.24484723391925522, 'exit_q50_pct': 0.337550665222313, 'ood_pct': 0.9065718333448222, 'cooldown_bars': 1}. Best is trial 3 with value: -1151.870207688625.
+[optuna] trades=29 tpd=0.6 pf=0.609 mdd=0.028 wr=0.655 net=0.972 score=-899.579
+[I 2025-12-30 14:05:42,215] Trial 13 finished with value: -899.5786489788659 and parameters: {'enter_q50_pct': 0.8028146482905039, 'enter_q10_pct': 0.1542438127458603, 'exit_q50_pct': 0.19677594266808884, 'ood_pct': 0.9651449670841349, 'cooldown_bars': 2}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=12 tpd=0.2 pf=0.755 mdd=0.012 wr=0.667 net=0.994 score=-2516.715
+[I 2025-12-30 14:05:42,336] Trial 14 finished with value: -2516.7146591337114 and parameters: {'enter_q50_pct': 0.8006189984965715, 'enter_q10_pct': 0.2185420059749282, 'exit_q50_pct': 0.20232485192841299, 'ood_pct': 0.9605267892847251, 'cooldown_bars': 3}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=17 tpd=0.3 pf=0.662 mdd=0.018 wr=0.706 net=0.988 score=-2031.606
+[I 2025-12-30 14:05:42,464] Trial 15 finished with value: -2031.6062228272726 and parameters: {'enter_q50_pct': 0.7999752468338875, 'enter_q10_pct': 0.16137212725533562, 'exit_q50_pct': 0.4982074392863459, 'ood_pct': 0.8762545684006714, 'cooldown_bars': 2}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=123 tpd=2.5 pf=0.515 mdd=0.155 wr=0.585 net=0.857 score=-3111.709
+[I 2025-12-30 14:05:42,590] Trial 16 finished with value: -3111.7088935447928 and parameters: {'enter_q50_pct': 0.7510288740134388, 'enter_q10_pct': 0.05330874163774037, 'exit_q50_pct': 0.14755241791794643, 'ood_pct': 0.9609940827137659, 'cooldown_bars': 2}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=3 tpd=0.1 pf=0.107 mdd=0.014 wr=0.333 net=0.986 score=-3924.676
+[I 2025-12-30 14:05:42,713] Trial 17 finished with value: -3924.676358767696 and parameters: {'enter_q50_pct': 0.854813136350743, 'enter_q10_pct': 0.28950040605171307, 'exit_q50_pct': 0.24319502262734302, 'ood_pct': 0.914696066176158, 'cooldown_bars': 3}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=13 tpd=0.3 pf=0.802 mdd=0.013 wr=0.692 net=0.995 score=-2360.667
+[I 2025-12-30 14:05:42,834] Trial 18 finished with value: -2360.6672843746437 and parameters: {'enter_q50_pct': 0.8084237941012501, 'enter_q10_pct': 0.19846795465828362, 'exit_q50_pct': 0.13924929667982996, 'ood_pct': 0.9569924807683758, 'cooldown_bars': 2}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=18 tpd=0.4 pf=0.552 mdd=0.023 wr=0.611 net=0.979 score=-2131.191
+[I 2025-12-30 14:05:42,961] Trial 19 finished with value: -2131.1906867642765 and parameters: {'enter_q50_pct': 0.7758457923272604, 'enter_q10_pct': 0.16859920374461596, 'exit_q50_pct': 0.23891159222051603, 'ood_pct': 0.8868127175837284, 'cooldown_bars': 1}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=50 tpd=1.0 pf=0.575 mdd=0.053 wr=0.600 net=0.948 score=-1239.411
+[I 2025-12-30 14:05:43,084] Trial 20 finished with value: -1239.4106038412838 and parameters: {'enter_q50_pct': 0.8205047662779118, 'enter_q10_pct': 0.12397385600246456, 'exit_q50_pct': 0.32821186761849863, 'ood_pct': 0.9868173051833109, 'cooldown_bars': 2}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=36 tpd=0.7 pf=0.516 mdd=0.045 wr=0.611 net=0.955 score=-1163.359
+[I 2025-12-30 14:05:43,203] Trial 21 finished with value: -1163.3591873166733 and parameters: {'enter_q50_pct': 0.8789488009979065, 'enter_q10_pct': 0.1425233292670053, 'exit_q50_pct': 0.2514669310086705, 'ood_pct': 0.9224920112539612, 'cooldown_bars': 0}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=40 tpd=0.8 pf=0.541 mdd=0.046 wr=0.625 net=0.954 score=-1157.480
+[I 2025-12-30 14:05:43,320] Trial 22 finished with value: -1157.4798065971804 and parameters: {'enter_q50_pct': 0.8583912223969294, 'enter_q10_pct': 0.13018414032221032, 'exit_q50_pct': 0.2353771253635338, 'ood_pct': 0.9178467140390218, 'cooldown_bars': 1}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=55 tpd=1.1 pf=0.475 mdd=0.075 wr=0.600 net=0.929 score=-1670.621
+[I 2025-12-30 14:05:43,439] Trial 23 finished with value: -1670.6208583710352 and parameters: {'enter_q50_pct': 0.8525518887652127, 'enter_q10_pct': 0.08162260599328786, 'exit_q50_pct': 0.14569209394129196, 'ood_pct': 0.9110539767001192, 'cooldown_bars': 1}. Best is trial 13 with value: -899.5786489788659.
+[optuna] trades=50 tpd=1.0 pf=0.627 mdd=0.049 wr=0.620 net=0.956 score=-1055.615
+[I 2025-12-30 14:05:43,559] Trial 24 finished with value: -1055.6146670136825 and parameters: {'enter_q50_pct': 0.794191854156725, 'enter_q10_pct': 0.11959246077158568, 'exit_q50_pct': 0.22042097805409366, 'ood_pct': 0.9434909429417729, 'cooldown_bars': 1}. Best is trial 13 with value: -899.5786489788659.
+[BEST] fold=1 value=-899.578649 thresholds={'enter_q50_min': 0.00131, 'enter_q10_min': -0.0100740833041684, 'exit_q50_below': 0.00041034099897003466, 'ood_thr': 0.020522172255514982, 'cooldown_bars': 2}
+[fold 1] TEST metrics: {'n_trades': 14.0, 'profit_factor': 0.35264515226287974, 'max_drawdown': 0.03580161190965803, 'winrate': 0.5714285714285714, 'net_ret': 0.9705551013099606, 'avg_ret_per_trade': -0.0021204721274633055, 'median_ret_per_trade': 0.0011711912550328722} | diag: {'n_trades': 14, 'mean_ret': -0.0021204721274633055, 'cost_rt': 0.0013, 'avg_hold_bars': 3.5714285714285716, 'avg_iqr_entry': 0.01648449764720031}
+
+=== FOLD 2 ===
+train: 2021-01-01 04:00:00+00:00 -> 2021-08-29 03:55:00+00:00 | n=68947
+val  : 2021-08-29 04:00:00+00:00 -> 2021-10-18 03:55:00+00:00 | n=14376
+test : 2021-10-18 04:00:00+00:00 -> 2021-12-07 03:55:00+00:00 | n=14400
+[fold 2] ep 1 loss train=0.027102 val=0.006576
+[fold 2] ep 2 loss train=0.010343 val=0.005864

@@ -1,0 +1,12 @@
+
+=== FOLD 0 ===
+train: 2021-01-31 00:00:00+00:00 -> 2021-08-29 00:00:00+00:00
+val  : 2021-08-29 00:00:00+00:00 -> 2021-09-28 00:00:00+00:00
+test : 2021-09-28 00:00:00+00:00 -> 2021-10-28 00:00:00+00:00
+/Users/oscarr/Desarrollo/Python0/DeepLScalp/DeepLScalp/.venv/lib/python3.12/site-packages/torch/nn/modules/transformer.py:286: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  warnings.warn(f"enable_nested_tensor is True, but self.use_nested_tensor is False because {why_not_sparsity_fast_path}")
+[WARN] state corrupto, se renombró a: models/full_itransformer/fold0_state.json.bad_1767046534. Se inicia sin resume de ese state. Error: Expecting value: line 9 column 17 (char 180)
+[fold 0] ep 1 loss train=0.776415 val=0.767351
+[fold 0] ep 2 loss train=0.770045 val=0.766648
+[fold 0] ep 3 loss train=0.772564 val=0.767519
+[fold 0] ep 4 loss train=0.769734 val=0.766765

@@ -551,4 +551,3 @@ def predict_v71(model, scaler, df: pd.DataFrame, feature_cols: list[str], cfg: d
     # set datetime index
     out.index = pd.to_datetime(df.loc[idx, "ds"], utc=True)
     return out.sort_index()
-    return out.sort_index()
