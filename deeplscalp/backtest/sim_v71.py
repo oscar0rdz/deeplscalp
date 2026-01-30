@@ -74,6 +74,11 @@ def profit_factor_stats(r: np.ndarray, pf_cap: float = DEFAULT_PF_CAP) -> Profit
         pf = float(min(pf_cap, pos / max(neg, PF_EPS)))
     return ProfitFactorStats(gross_profit=pos, gross_loss=neg, pf=pf, zero_loss=zero_loss)
 
+def _profit_factor(r: np.ndarray) -> float:
+    # Wrapper for compatibility with existing code
+    return profit_factor_stats(r).pf
+
+
 
 def _round_trip_cost_rt(cfg: dict, cost_mult: float = 1.0) -> float:
     try:
