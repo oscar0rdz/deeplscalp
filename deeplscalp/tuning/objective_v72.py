@@ -54,10 +54,17 @@ def robust_objective_v2(
 
     score = pf_score_for_objective(pf_raw, ntr, min_trades=ntr_min)
     score += 5.0 * net_return           # aumenta el peso del retorno neto
-    score -= lam_mdd * mdd
+    
+    # MDD penalty (hard clamp at 1.0 handled by sim_v71)
+    # If mdd is 1.0 (bust), this will heavily penalize the score
+    score -= lam_mdd * (mdd if mdd < 1.0 else 10.0) 
     score -= lam_turn * turnover
 
     if avg_hold_bars < hold_min_bars:
         score -= gamma_hold * float(hold_min_bars - avg_hold_bars)
+
+    # Si net es negativo, penalización adicional para forzar edge real
+    if net_return < 0:
+        score -= 2.0 
 
     return float(score)

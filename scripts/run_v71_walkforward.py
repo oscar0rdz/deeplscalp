@@ -402,15 +402,15 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
 
     def obj(trial: optuna.Trial):
         # --- PATCH C: Search Space Optimization ---
-        p_side_min = trial.suggest_float("p_side_min", 0.55, 0.70)
-        score_q = trial.suggest_float("score_q", 0.80, 0.95)
+        p_side_min = trial.suggest_float("p_side_min", 0.52, 0.66)
+        score_q = trial.suggest_float("score_q", 0.80, 0.93)
         q_width_max = trial.suggest_float("q_width_max", 0.02, 0.20)
-        ev_buffer = trial.suggest_float("ev_buffer", -0.0003, 0.0010)
-        topk_frac = trial.suggest_float("topk_frac", 0.002, 0.02, log=True)  # 0.2% a 2%
+        ev_buffer = trial.suggest_float("ev_buffer", -0.0002, 0.0004)
+        topk_frac = trial.suggest_float("topk_frac", 0.01, 0.05)
         top_k = max(50, int(topk_frac * len(pred_val)))
-        atr_min = trial.suggest_float("atr_min", 0.0, 0.0005)
-        rv_min = trial.suggest_float("rv_min", 0.0, 0.0002)
-        rv_max = trial.suggest_float("rv_max", 0.0003, 0.0030)
+        atr_min = trial.suggest_float("atr_min", 1e-6, 3e-4, log=True)
+        rv_min = trial.suggest_float("rv_min", 1e-6, 2e-4, log=True)
+        rv_max = trial.suggest_float("rv_max", 6e-4, 3e-3, log=True)
 
         thresholds = {
             "p_side_min": p_side_min,

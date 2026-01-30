@@ -64,8 +64,12 @@ def profit_factor_stats(r: np.ndarray, pf_cap: float = DEFAULT_PF_CAP) -> Profit
     pos = float(r[r > 0].sum())
     neg = float(abs(r[r < 0].sum()))
     zero_loss = bool(neg < PF_EPS)
+    
     if zero_loss:
-        pf = float(pf_cap if pos > 0 else 0.0)
+        # PF es NaN si no hay pérdidas para evitar inflado artificial, 
+        # o podemos usar pf_cap si hay ganancias. 
+        # El usuario sugirió NaN en el prompt para penalizar o alinear.
+        pf = float(np.nan if neg <= 1e-12 else (pf_cap if pos > 0 else 0.0))
     else:
         pf = float(min(pf_cap, pos / max(neg, PF_EPS)))
     return ProfitFactorStats(gross_profit=pos, gross_loss=neg, pf=pf, zero_loss=zero_loss)
@@ -127,18 +131,24 @@ def topk_streaming_by_day(index: pd.DatetimeIndex, score: np.ndarray, top_k: int
     return out
 
 
-def _profit_factor(r: np.ndarray) -> float:
-    # Mantén esta función si otras partes la usan, pero ahora es robusta y finita.
-    s = profit_factor_stats(r)
-    return float(s.pf)
+def compute_mdd_from_equity(equity: np.ndarray) -> float:
+    eq = np.asarray(equity, dtype=float)
+    if eq.size == 0:
+        return 0.0
+
+    # Si hay quiebra o valores inválidos, cuenta como 100% DD
+    if not np.isfinite(eq).all() or np.any(eq <= 0):
+        return 1.0
+
+    peak = np.maximum.accumulate(eq)
+    dd = (peak - eq) / np.maximum(peak, 1e-12)
+    mdd = float(np.max(dd))
+    # Clamp duro
+    return float(np.clip(mdd, 0.0, 1.0))
 
 
 def _max_drawdown(equity: np.ndarray) -> float:
-    if len(equity) == 0:
-        return 0.0
-    peak = np.maximum.accumulate(equity)
-    dd = 1.0 - (equity / (peak + EPS))
-    return float(np.max(dd))
+    return compute_mdd_from_equity(equity)
 
 
 def _sortino_proxy(r: np.ndarray) -> float:
