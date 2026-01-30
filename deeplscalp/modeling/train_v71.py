@@ -177,9 +177,10 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
     except Exception:
         pass
 
-    seq_len = int(cfg["features"]["seq_len"])
-    mcfg = cfg["model"]
-    tcfg = cfg["train"]
+    features_cfg = cfg.get("features", {}) if isinstance(cfg, dict) else {}
+    seq_len = int(features_cfg.get("seq_len", 256))
+    mcfg = cfg.get("model", {})
+    tcfg = cfg.get("train", {})
     q_raw = mcfg.get("quantiles", [0.1, 0.5, 0.9])
     quantiles = [float(q) for q in q_raw]
 
