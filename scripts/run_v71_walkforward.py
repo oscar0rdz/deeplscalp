@@ -479,6 +479,55 @@ def _resolve_prebuilt_dir(cfg: dict) -> str | None:
     return d1 or d2
 
 
+def _pick_col(df, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def sanitize_walkforward_summary(summary_csv: str, sane_csv: str, min_trades=200, pf_cap=10.0):
+    p = Path(summary_csv)
+    if not p.exists():
+        print(f"[SAN] No existe: {p}")
+        return
+
+    df = pd.read_csv(p)
+
+    trades_col = _pick_col(df, ["n_trades", "trades", "num_trades", "N_TRADES"])
+    pf_col = _pick_col(df, ["pf", "profit_factor", "PF", "profitFactor"])
+    mdd_col = _pick_col(df, ["mdd", "max_drawdown", "max_dd", "MDD"])
+    wr_col = _pick_col(df, ["winrate", "win_rate", "wr", "WINRATE"])
+
+    # Normaliza numéricos
+    for c in [trades_col, pf_col, mdd_col, wr_col]:
+        if c and c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Clamp winrate/mdd si existen
+    if wr_col:
+        df[wr_col] = df[wr_col].clip(lower=0.0, upper=1.0)
+    if mdd_col:
+        df[mdd_col] = df[mdd_col].clip(lower=0.0, upper=1.0)
+
+    # PF saneado
+    if pf_col:
+        pf = df[pf_col].replace([np.inf, -np.inf], np.nan)
+        pf = pf.where((pf > 0) & (pf <= pf_cap), np.nan)
+        df[pf_col] = pf
+
+    # Penaliza folds con pocas operaciones (marca inválidos)
+    if trades_col:
+        df["valid_min_trades"] = df[trades_col].fillna(0) >= float(min_trades)
+    else:
+        df["valid_min_trades"] = True  # no hay info, no bloquea
+
+    out = Path(sane_csv)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out, index=False)
+    print(f"[SAN] guardado: {out}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -587,6 +636,8 @@ def main() -> None:
                 cfg["data"] = data_cfg
                 print(f"[DATA] --no-build: prebuilt_dir inferido: {prebuilt_dir}")
 
+        if getattr(args, "no_build", False):
+            print("[BUILD] --no-build activo: saltando pipeline build")
         else:
             subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
         ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
@@ -747,6 +798,14 @@ def main() -> None:
     sm = pd.DataFrame(all_fold_metrics)
     sm.to_csv(out_dir / "reports" / "walkforward_summary.csv", index=False)
     print(f"[OK] wrote {out_dir / 'reports' / 'walkforward_summary.csv'}")
+
+    # Sanitizer
+    sanitize_walkforward_summary(
+        str(out_dir / "reports" / "walkforward_summary.csv"),
+        str(out_dir / "reports" / "walkforward_summary_sane.csv"),
+        min_trades=cfg.get("objective", {}).get("min_trades", 200),
+        pf_cap=cfg.get("objective", {}).get("pf_cap", 10.0),
+    )
 
 
 if __name__ == "__main__":

@@ -449,8 +449,12 @@ def process_pair_v71(pair: str, cfg: Dict, raw_dir: Path, out_dir: Path, anchor_
 
 
 def cmd_audit(cfg: Dict) -> None:
+    # [KAGGLE PATCH] Si falta 'freqtrade', se asume dataset preconstruido y se omite audit.
+    if not isinstance(cfg, dict) or "freqtrade" not in cfg:
+        print("[AUDIT] Sin sección 'freqtrade' en config; saltando audit.")
+        return
+
     raw_dir = Path(cfg["freqtrade"]["datadir"]).expanduser()
-    out_dir = Path(cfg.get("project", {}).get("out_dir", "artifacts")).expanduser()
     _ensure_dir(out_dir / "data_audit")
 
     for pair in cfg["universe"]["pairs"]:
