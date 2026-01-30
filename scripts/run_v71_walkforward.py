@@ -490,14 +490,13 @@ DEFAULT_MIN_TRADES = 200
 DEFAULT_PF_CAP = 10.0
 
 
-def maybe_pipeline_build(args):
+def pipeline_build(args):
     """Encapsulates pipeline build logic. Respects --no-build."""
     if getattr(args, "no_build", False):
         print("[BUILD] --no-build activo: saltando pipeline build")
         return
-    import subprocess
-    import sys
 
+    print("[BUILD] Ejecutando pipeline build...")
     subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
 
 
@@ -603,7 +602,7 @@ def main() -> None:
             if args.no_build or use_prebuilt:
                 raise FileNotFoundError(msg)
             print(msg + "       building via pipeline...")
-            maybe_pipeline_build(args)
+            pipeline_build(args)
             ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
     else:
         if use_prebuilt and args.no_build:
@@ -648,7 +647,7 @@ def main() -> None:
                 cfg["data"] = data_cfg
                 print(f"[DATA] --no-build: prebuilt_dir inferido: {prebuilt_dir}")
 
-        maybe_pipeline_build(args)
+        pipeline_build(args)
         ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
 
     df = pd.read_parquet(ds_path)
