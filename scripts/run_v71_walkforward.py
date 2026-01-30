@@ -116,44 +116,46 @@ def compute_objective(pnls, equity_curve, n_trades, cfg):
     # Config
     tcfg = cfg.get("tuner", {})
     min_trades = int(tcfg.get("min_trades", 200))
-    min_dd = float(tcfg.get("min_drawdown", 0.002))
-    pf_cap = float(tcfg.get("pf_cap", 20.0))
-    objective = str(tcfg.get("objective", "calmar"))
+    # pf_cap = float(tcfg.get("pf_cap", 10.0))  # Unificado a 10.0
 
     pnls = np.asarray(pnls, dtype=float)
     eq = np.asarray(equity_curve, dtype=float)
 
-    pf = profit_factor(pnls, cap=pf_cap)
-    mdd = max_drawdown(eq)
+    # Re-calculamos métricas para coherencia
+    from deeplscalp.utils.metrics import profit_factor as pf_func, max_drawdown as mdd_func
+    pf = pf_func(pnls, cap=10.0)
+    mdd = mdd_func(eq)
     equity_final = float(eq[-1]) if eq.size else 1.0
     net = equity_final - 1.0
 
-    # Penalizaciones duras (anti autoengaño)
+    # --- PARCHE A: Reglas duras (realismo) ---
+    # Castigo fuerte por baja actividad
     if n_trades < min_trades:
-        return -1e6 + n_trades, pf, mdd, equity_final
-    if mdd < min_dd:
-        # drawdown demasiado "perfecto" -> sospecha de bug/latencia/costos/llenado
-        return -1e5 - (min_dd - mdd), pf, mdd, equity_final
-    if pf.flag in ("no_trades",):
-        return -1e6, pf, mdd, equity_final
+        return -1_000_000 + float(n_trades), pf, mdd, equity_final
 
-    # Objetivos robustos
-    if objective == "calmar":
-        calmar = net / max(mdd, 1e-6)
-        # queremos maximizar -> optuna suele minimizar: devolvemos negativo
-        obj = -calmar
-    elif objective == "net":
-        obj = -net
-    else:
-        # fallback: mezcla (net y pf sin cap)
-        pf_val = pf.pf_raw if math.isfinite(pf.pf_raw) else pf_cap
-        obj = -(net * 100.0) + (mdd * 10.0) - (min(pf_val, pf_cap) * 0.1)
+    # Si pierde dinero, NO es aceptable para “producción”
+    if net <= 0:
+        return -200_000 + 1000.0 * float(net) - 1000.0 * float(mdd), pf, mdd, equity_final
 
-    # Si no hay pérdidas (pf infinito), no permitas "paraíso" sin net real
-    if pf.flag == "no_losses" and net < 0.01:
-        obj += 100.0  # castigo
+    # Si el drawdown es inaceptable, castigo duro
+    MAX_MDD = float(cfg.get("objective", {}).get("max_mdd", 0.35))
+    if mdd > MAX_MDD:
+        return -150_000 - 1000.0 * float(mdd - MAX_MDD), pf, mdd, equity_final
 
-    return obj, pf, mdd, equity_final
+    # Objetivo suave: premia PF pero también net y penaliza mdd
+    # (ajusta pesos si quieres más conservador)
+    pf_capped = pf.pf_capped
+    obj = (
+        10.0 * np.log1p(pf_capped)      # PF con saturación
+        + 200.0 * float(net)            # rentabilidad manda
+        - 80.0 * float(mdd)             # drawdown castiga fuerte
+    )
+    
+    # Queremos MAXIMIZAR este obj en Optuna (si Optuna está en direction="maximize")
+    # Si Optuna está en "minimize", habría que devolver -obj.
+    # Pero usualmente el pipeline_v71 maneja esto devolviendo el valor positivo
+    # y configurando Optuna con direction="maximize".
+    return float(obj), pf, mdd, equity_final
 
 
 def enforce_time_order(df, time_col: str = "timestamp", strict_time: bool = True):
@@ -399,12 +401,12 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
     overtrade_penalty = float(obj_cfg.get("overtrade_penalty", 1.0))
 
     def obj(trial: optuna.Trial):
-        # Hyperparams (rangos hardcodeados como en tu versión original)
-        p_side_min = trial.suggest_float("p_side_min", 0.55, 0.80)
-        score_q = trial.suggest_float("score_q", 0.80, 0.99)
+        # --- PATCH C: Search Space Optimization ---
+        p_side_min = trial.suggest_float("p_side_min", 0.55, 0.70)
+        score_q = trial.suggest_float("score_q", 0.80, 0.95)
         q_width_max = trial.suggest_float("q_width_max", 0.02, 0.20)
         ev_buffer = trial.suggest_float("ev_buffer", -0.0003, 0.0010)
-        topk_frac = trial.suggest_float("topk_frac", 0.001, 0.02, log=True)  # 0.1% a 2%
+        topk_frac = trial.suggest_float("topk_frac", 0.002, 0.02, log=True)  # 0.2% a 2%
         top_k = max(50, int(topk_frac * len(pred_val)))
         atr_min = trial.suggest_float("atr_min", 0.0, 0.0005)
         rv_min = trial.suggest_float("rv_min", 0.0, 0.0002)

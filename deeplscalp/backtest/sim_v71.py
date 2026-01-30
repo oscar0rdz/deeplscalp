@@ -50,7 +50,7 @@ def apply_costs(raw_ret: np.ndarray, n_trades: int, exec_cfg: ExecConfig, atr_re
 
 # Caps realistas para evitar que Optuna se "escape" con gross_loss≈0
 PF_EPS = 1e-8
-DEFAULT_PF_CAP = 20.0
+DEFAULT_PF_CAP = 10.0
 
 @dataclass(frozen=True)
 class ProfitFactorStats:
