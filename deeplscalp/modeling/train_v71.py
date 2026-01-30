@@ -187,6 +187,21 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
     train_df = train_df.dropna()
     val_df = val_df.dropna()
 
+    # --- Sanity Check: NaNs/Infs ---
+    n_total = len(train_df)
+    n_nan = train_df[feature_cols].isna().sum().sum()
+    n_inf = np.isinf(train_df[feature_cols].to_numpy()).sum()
+    
+    if (n_nan + n_inf) > 0:
+        ratio = (n_nan + n_inf) / (n_total * len(feature_cols))
+        msg = f"[TRAIN] Error: Detectados {n_nan} NaNs y {n_inf} Infs en features de entrenamiento (ratio={ratio:.4%})."
+        print(msg)
+        if ratio > 0.001:  # 0.1% threshold
+            raise ValueError(msg)
+        else:
+            print("[TRAIN] Warning: Pocos NaNs/Infs detectados, llenando con 0.0...")
+            train_df[feature_cols] = train_df[feature_cols].fillna(0.0).replace([np.inf, -np.inf], 0.0)
+
     # scaler + pre-escalado 2D (clave para velocidad)
     scaler = _make_scaler(train_df, feature_cols)
 
