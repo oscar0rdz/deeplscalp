@@ -486,7 +486,22 @@ def _pick_col(df, candidates):
     return None
 
 
-def sanitize_walkforward_summary(summary_csv: str, sane_csv: str, min_trades=200, pf_cap=10.0):
+DEFAULT_MIN_TRADES = 200
+DEFAULT_PF_CAP = 10.0
+
+
+def maybe_pipeline_build(args):
+    """Encapsulates pipeline build logic. Respects --no-build."""
+    if getattr(args, "no_build", False):
+        print("[BUILD] --no-build activo: saltando pipeline build")
+        return
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
+
+
+def sanitize_walkforward_summary(summary_csv: str, sane_csv: str, min_trades=DEFAULT_MIN_TRADES, pf_cap=DEFAULT_PF_CAP):
     p = Path(summary_csv)
     if not p.exists():
         print(f"[SAN] No existe: {p}")
@@ -588,10 +603,7 @@ def main() -> None:
             if args.no_build or use_prebuilt:
                 raise FileNotFoundError(msg)
             print(msg + "       building via pipeline...")
-            if getattr(args, "no_build", False):
-                print("[BUILD] --no-build activo: saltando pipeline build")
-            else:
-                subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
+            maybe_pipeline_build(args)
             ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
     else:
         if use_prebuilt and args.no_build:
@@ -636,10 +648,7 @@ def main() -> None:
                 cfg["data"] = data_cfg
                 print(f"[DATA] --no-build: prebuilt_dir inferido: {prebuilt_dir}")
 
-        if getattr(args, "no_build", False):
-            print("[BUILD] --no-build activo: saltando pipeline build")
-        else:
-            subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
+        maybe_pipeline_build(args)
         ds_path = out_dir / "datasets" / f"train_{_norm_pair(pair)}_{tf}_v71.parquet"
 
     df = pd.read_parquet(ds_path)
@@ -803,8 +812,8 @@ def main() -> None:
     sanitize_walkforward_summary(
         str(out_dir / "reports" / "walkforward_summary.csv"),
         str(out_dir / "reports" / "walkforward_summary_sane.csv"),
-        min_trades=cfg.get("objective", {}).get("min_trades", 200),
-        pf_cap=cfg.get("objective", {}).get("pf_cap", 10.0),
+        min_trades=cfg.get("objective", {}).get("min_trades", DEFAULT_MIN_TRADES),
+        pf_cap=cfg.get("objective", {}).get("pf_cap", DEFAULT_PF_CAP),
     )
 
 
