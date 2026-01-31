@@ -128,33 +128,29 @@ def compute_objective(pnls, equity_curve, n_trades, cfg):
     equity_final = float(eq[-1]) if eq.size else 1.0
     net = equity_final - 1.0
 
-    # --- PARCHE A: Reglas duras (realismo) ---
-    # Castigo fuerte por baja actividad
-    if n_trades < min_trades:
-        return -1_000_000 + float(n_trades), pf, mdd, equity_final
-
-    # Si pierde dinero, NO es aceptable para “producción”
-    if net <= 0:
-        return -200_000 + 1000.0 * float(net) - 1000.0 * float(mdd), pf, mdd, equity_final
-
-    # Si el drawdown es inaceptable, castigo duro
-    MAX_MDD = float(cfg.get("objective", {}).get("max_mdd", 0.35))
-    if mdd > MAX_MDD:
-        return -150_000 - 1000.0 * float(mdd - MAX_MDD), pf, mdd, equity_final
-
-    # Objetivo suave: premia PF pero también net y penaliza mdd
-    # (ajusta pesos si quieres más conservador)
-    pf_capped = pf.pf_capped
-    obj = (
-        10.0 * np.log1p(pf_capped)      # PF con saturación
-        + 200.0 * float(net)            # rentabilidad manda
-        - 80.0 * float(mdd)             # drawdown castiga fuerte
-    )
+    # --- PARCHE 3 (SÚPER IMPORTANTE): Objetivo de Optuna ---
+    # Recuperamos métricas directo de los inputs (o recalculamos si es necesario)
+    # pf ya viene calculado arriba: pf = pf_func(pnls, cap=10.0)
     
-    # Queremos MAXIMIZAR este obj en Optuna (si Optuna está en direction="maximize")
-    # Si Optuna está en "minimize", habría que devolver -obj.
-    # Pero usualmente el pipeline_v71 maneja esto devolviendo el valor positivo
-    # y configurando Optuna con direction="maximize".
+    pf_val = pf.pf_capped
+    
+    # Hard constraints (solo aquí castigos grandes)
+    if n_trades < min_trades:
+        return -1e6 + float(n_trades), pf, mdd, equity_final
+
+    if not np.isfinite(net) or not np.isfinite(mdd) or not np.isfinite(pf_val):
+        return -1e6, pf, mdd, equity_final
+
+    # Score continuo (Optuna sí puede optimizar esto)
+    # Queremos: net alto, mdd bajo, pf decente
+    pf_cap = float(cfg.get("objective", {}).get("pf_cap", 10.0))
+    
+    # Fórmula del usuario: 
+    # obj = (1000.0 * net) - (200.0 * mdd) + (2.0 * min(pf, pf_cap))
+    # NOTA: net es equity_final - 1.0
+    
+    obj = (1000.0 * net) - (200.0 * mdd) + (2.0 * min(pf_val, pf_cap))
+
     return float(obj), pf, mdd, equity_final
 
 
@@ -770,6 +766,24 @@ def main() -> None:
         study = optuna.create_study(direction="maximize")
         study.optimize(obj, n_trials=int(cfg["tuning"]["n_trials"]))
         best_thresholds = study.best_params
+
+        # --- PARCHE 4: Auditoría anti-inflado (guardar best valida) ---
+        print(f"[AUDIT] Re-running best params on VAL fold {fold['fold_id']} for artifacts...")
+        met_val, diag_val = backtest_from_predictions_v71(pred_val, cfg, best_thresholds)
+        
+        fold_dir = out_dir / "reports" / f"fold_{fold['fold_id']}"
+        _ensure_dir(fold_dir)
+        
+        # Guardar artifacts de la mejor pasada de validación
+        if "trades_df" in diag_val:
+            diag_val["trades_df"].to_csv(fold_dir / "best_trades.csv", index=False)
+        
+        if "equity" in diag_val:
+            pd.DataFrame({"equity": diag_val["equity"]}).to_csv(fold_dir / "best_equity.csv", index=False)
+            
+        with open(fold_dir / "best_metrics.json", "w") as f:
+            json.dump(met_val, f, indent=2)
+        # -------------------------------------------------------------
 
         # Predict TEST
         pred_test = predict_v71(

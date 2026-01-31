@@ -36,6 +36,22 @@ class ExecConfig:
 def _bps_cost_to_ret(cost_bps: float) -> float:
     return float(cost_bps) * 1e-4
 
+def _max_drawdown_from_equity(equity: np.ndarray) -> float:
+    equity = np.asarray(equity, dtype=float)
+    if equity.size == 0:
+        return 0.0
+    peak = np.maximum.accumulate(equity)
+    dd = (peak - equity) / np.maximum(peak, 1e-12)
+    return float(np.nanmax(dd))
+
+def _equity_from_returns(r: np.ndarray, equity0: float = 1.0) -> np.ndarray:
+    r = np.asarray(r, dtype=float)
+    if r.size == 0:
+        return np.array([equity0], dtype=float)
+    # r debe ser retorno fraccional por trade o por bar: e.g. +0.001 = +0.1%
+    equity = equity0 * np.cumprod(1.0 + r)
+    return np.concatenate([[equity0], equity])
+
 def apply_costs(raw_ret: np.ndarray, n_trades: int, exec_cfg: ExecConfig, atr_rel: float | None = None):
     """
     Aplica costos por trade de manera consistente: entry+exit.
@@ -470,32 +486,37 @@ def backtest_from_predictions_v71(
                 dbg["skip_atr"] += 1
                 continue
 
-            # Aplicar spread y slippage
+            # Aplicar spread y slippage (PARCHE 2: Costos Reales)
             mid = px
             spread_bps = float(thresholds.get("spread_bps", 5.0))
             slippage_bps = float(thresholds.get("slippage_bps", 2.0))
-            if side_choice == 1:
-                # Long: entry en ask, exit en bid
-                entry_px = _apply_spread(mid, spread_bps, "ask")
-                exit_px = _apply_spread(mid, spread_bps, "bid")
-            else:
-                # Short: entry en bid, exit en ask
-                entry_px = _apply_spread(mid, spread_bps, "bid")
-                exit_px = _apply_spread(mid, spread_bps, "ask")
+            
+            # Unificar spread/2 dentro de 'slip' para asegurar impacto
+            # slip_total = slippage + spread/2
+            half_spread_frac = (spread_bps / 10000.0) / 2.0
+            slip_frac = (slippage_bps / 10000.0)
+            
+            # Costo total de fricción en precio (por lado)
+            total_slip = slip_frac + half_spread_frac
 
-            # Slippage
-            slip = (slippage_bps / 10000.0)
             if side_choice == 1:
-                entry_px *= (1.0 + slip)
-                exit_px *= (1.0 - slip)
+                # Long: Compra caro (ask), Vende barato (bid)
+                # entry = mid * (1 + slip)
+                # exit (preliminar) = mid * (1 - slip)
+                entry_px = mid * (1.0 + total_slip)
+                # El exit se recalcula al salir, pero aquí definimos la base si fuera instantáneo (no se usa realmente)
+                exit_px = mid * (1.0 - total_slip)
             else:
-                entry_px *= (1.0 - slip)
-                exit_px *= (1.0 + slip)
+                # Short: Vende barato (bid), Compra caro (ask)
+                # entry = mid * (1 - slip)
+                entry_px = mid * (1.0 - total_slip)
+                exit_px = mid * (1.0 + total_slip)
 
             # Redondeo a tick_size
             tick_size = float(thresholds.get("tick_size", 0.0001))
             entry_px = _round_to_tick(entry_px, tick_size)
-            exit_px = _round_to_tick(exit_px, tick_size)
+            # exit_px no se usa aquí realmente para la salida, se usa para sizing si acaso.
+            # La salida real aplica su propio spread/slip al momento del exit (ver lógica abajo).
 
             # Sizing y redondeo a step_size
             qty = 1.0  # placeholder
@@ -824,18 +845,48 @@ def backtest_from_predictions_v71(
         "dd": equity_dd,
     })
 
-    n_trades = int(len(r))
-    winrate = float((r > 0).mean()) if n_trades else 0.0
+    # --- PARCHE 1: Unificar métricas desde r_net ---
+    pf_cap = float(cfg.get("objective", {}).get("pf_cap", 10.0))
+    
+    # r_net es la verdad única. Asegurar que es numpy array float
+    r_net_final = np.asarray(r, dtype=float)
+    
+    # Reconstruir equity y MDD desde la serie final
+    equity_curve_final = _equity_from_returns(r_net_final, equity0=1.0)
+    
+    # Métricas clave
+    net = float(equity_curve_final[-1] - 1.0)
+    mdd = _max_drawdown_from_equity(equity_curve_final)
+    
+    pf = 0.0
+    pf_raw = 0.0
+    if r_net_final.size > 0:
+        pf_stats = profit_factor_stats(r_net_final, pf_cap=pf_cap)
+        # s.pf ya viene limitado por pf_cap
+        pf = float(pf_stats.pf) if np.isfinite(pf_stats.pf) else 0.0
+        
+        # Reconstruimos pf_raw
+        g_p = pf_stats.gross_profit
+        g_l = pf_stats.gross_loss
+        if g_l < 1e-12:
+             pf_raw = float(g_p / 1e-12) if g_p > 0 else 0.0
+        else:
+             pf_raw = float(g_p / g_l)
+    
+    n_trades = int(r_net_final.size)
+    winrate = float((r_net_final > 0).mean()) if n_trades else 0.0
 
     metrics = {
-        "n_trades": float(n_trades),
-        "profit_factor": float(_profit_factor(r)) if n_trades else 0.0,
-        "max_drawdown": float(np.max(equity_dd)) if equity_dd else 0.0,
-        "sortino": float(_sortino_proxy(r)) if n_trades else 0.0,
-        "winrate": float(winrate),
-        "equity_final": float(eq[-1]) if len(eq) else 1.0,
-        "avg_ret_per_trade": float(r.mean()) if n_trades else 0.0,
-        "median_ret_per_trade": float(np.median(r)) if n_trades else 0.0,
+        "net": net,
+        "mdd": mdd,
+        "profit_factor_raw": pf_raw,
+        "profit_factor": pf,
+        "n_trades": n_trades,
+        "winrate": winrate,
+        "sortino": float(_sortino_proxy(r_net_final)) if n_trades else 0.0,
+        "equity_final": float(equity_curve_final[-1]),
+        "avg_ret_per_trade": float(r_net_final.mean()) if n_trades else 0.0,
+        "median_ret_per_trade": float(np.median(r_net_final)) if n_trades else 0.0,
     }
 
     diag.update({
