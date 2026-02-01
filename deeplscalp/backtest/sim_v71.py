@@ -856,84 +856,55 @@ def backtest_from_predictions_v71(
 
     diag = {}
 
-    # --- COSTS (fee/slippage) Hook [PARCHE 3] ---
-    # Se aplica costos a nivel DataFrame de trades para robustez
-    try:
-        # Construir trades_df preliminar para aplicar costos
-        if not trades_list:
-            trades_df = pd.DataFrame(columns=["ts_entry", "ts_exit", "side", "entry_price", "exit_price", "ret_raw", "ret_net", "pnl"])
-        else:
-            trades_df = pd.DataFrame(trades_list)
-            # Asegurar pnl
-            if "pnl" not in trades_df.columns:
-                 # ret_net ya tiene costos 'simulados' por la lógica loop anterior, pero 
-                 # _apply_costs_to_trades es la autoridad final si se configura fee_bps en sim.
-                 # Para no duplicar, si ya restamos en el loop, ojo.
-                 # La logica del loop usa cost_rt_notional que viene de _round_trip_cost_rt.
-                 # Esa funcion suele leer risk.fee_rate. 
-                 # _apply_costs_to_trades lee sim.fee_bps.
-                 # Debemos alinear. Por ahora asumimos que el loop calculó un 'ret_net' base
-                 # y vamos a re-verificar con _apply_costs_to_trades si cfg['sim'] manda.
-                 if "ret_net" in trades_df.columns:
-                     trades_df["pnl"] = trades_df["ret_net"]
-                 else:
-                     trades_df["pnl"] = 0.0
-        
-        # Aplicar corrección robusta de costos
-        if 'trades_df' in locals() and hasattr(trades_df, 'columns'):
-            trades_df = _apply_costs_to_trades(trades_df, cfg)
-            # Actualizar rets/equity desde el pnl_net corregido
-            if "pnl_net" in trades_df.columns and len(trades_df) > 0:
-                # Reconstruir rets y equity
-                # Esto es costoso pero garantiza coherencia absoluta
-                new_rets = trades_df["pnl_net"].astype(float).to_numpy()
-                # Ojo: la lista rets original tenía longitud de trades.
-                # Actualizamos la lista 'rets' usada para calcular métricas abajo
-                rets = new_rets.tolist()
-                
-                # Reconstruir equity curve solo con los trades (simplificado)
-                # Ojo: la equity curve original 'equity' tiene resolution por-trade (aprox)
-                # Si queremos mantener coherencia:
-                equity = [1.0]
-                for r_val in rets:
-                    equity.append(equity[-1] * (1.0 + r_val))
-                eq = np.asarray(equity, dtype=np.float64)
-                
-    except Exception as e:
-        # fail-fast: si el usuario configuró fee_bps>0 y no se puede aplicar, mejor romper
-        raise RuntimeError(f"Error aplicando costos robustos: {e}")
-
-    # Aplicar costos detallados si exec_cfg está definido
-    if exec_cfg is not None:
-        atr_rel = np.mean(atr[entry_i] / entry_px) if entry_i < len(atr) else None
-        r_net, (fee, spread, slip) = apply_costs(r, len(r), exec_cfg, atr_rel)
-        # Guardar métricas de costos
-        diag["fee_per_trade"] = float(fee)
-        diag["spread_per_trade"] = float(spread)
-        diag["slip_per_trade"] = float(slip)
-        diag["trade_ret_raw"] = r.copy()
-        diag["trade_ret_net"] = r_net.copy()
-        r = r_net
-    else:
-        # Si no hay cfg detallado, de todos modos asegura diag
-        rets_arr = np.array(rets)
-        diag["trade_ret_raw"] = rets_arr + (cost_rt_notional * leverage * risk_fraction)
-        diag["trade_ret_net"] = rets_arr
-
-    eq = np.asarray(equity, dtype=np.float64)
-
-    # --- PATCH: ensure pnl exists (used by tuner/objective) ---
+    # ---------------------------------------------------------
+    # [PARCHE 3 FIXED] Consolidación de Costos y PnL/Trades
+    # ---------------------------------------------------------
+    # 1. Construir trades_df base
     if not trades_list:
         trades_df = pd.DataFrame(columns=["ts_entry", "ts_exit", "side", "entry_price", "exit_price", "ret_raw", "ret_net", "pnl"])
     else:
         trades_df = pd.DataFrame(trades_list)
         if "pnl" not in trades_df.columns:
-            if "ret_net" in trades_df.columns:
-                trades_df["pnl"] = trades_df["ret_net"].astype("float64")
-            elif "ret_raw" in trades_df.columns:
-                trades_df["pnl"] = trades_df["ret_raw"].astype("float64")
-            else:
-                trades_df["pnl"] = 0.0
+             if "ret_net" in trades_df.columns:
+                 trades_df["pnl"] = trades_df["ret_net"]
+             else:
+                 trades_df["pnl"] = 0.0
+
+    # 2. Aplicar costos robustos desde cfg.sim.fee_bps (Autoritativo)
+    # Esto actualiza/crea 'pnl_net' en trades_df
+    try:
+        if hasattr(trades_df, 'columns'):
+            trades_df = _apply_costs_to_trades(trades_df, cfg)
+    except Exception as e:
+        raise RuntimeError(f"Error aplicando costos robustos: {e}")
+
+    # 3. Sincronizar 'pnl' final y 'rets'/'equity'
+    # Si tenemos pnl_net, ese es el pnl real que debe usarse para métricas
+    if "pnl_net" in trades_df.columns and not trades_df.empty:
+        trades_df["pnl"] = trades_df["pnl_net"]
+        
+        # Reconstruir rets y equity curve principal para consistencia total
+        rets = trades_df["pnl"].astype(float).tolist()
+        r = np.asarray(rets, dtype=np.float64)
+        
+        equity = [1.0]
+        for val in rets:
+            equity.append(equity[-1] * (1.0 + val))
+        eq = np.asarray(equity, dtype=np.float64)
+
+    # 4. Log diagnóstico de costos detallados (Legacy / ExecCfg)
+    if exec_cfg is not None:
+        # Si se pasa exec_cfg explícito, calculamos desglose para diagnóstico.
+        atr_rel = np.mean(atr[entry_i] / entry_px) if entry_i < len(atr) else None
+        # No modificamos r ni trades_df aquí para no doble-contar o entrar en conflicto 
+        # con _apply_costs_to_trades, salvo para rellenar 'diag'.
+        _, (fee, spread, slip) = apply_costs(r, len(r), exec_cfg, atr_rel)
+        diag["fee_per_trade"] = float(fee)
+        diag["spread_per_trade"] = float(spread)
+        diag["slip_per_trade"] = float(slip)
+        diag["trade_ret_net"] = r 
+    else:
+        diag["trade_ret_net"] = r
     # ---------------------------------------------------------
 
     # Build equity_df: ts, equity, dd, position
