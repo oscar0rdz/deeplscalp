@@ -667,6 +667,41 @@ def main() -> None:
     cfg.setdefault("dataset", {})
     cfg.setdefault("tuning", {})
 
+    # --- FAIL-FAST: Validate Config ---
+    # Revisión temprana de requisitos mínimos para no corretear y fallar horas después
+    if "data" not in cfg and "dataset" not in cfg:
+        # Esto ya pasaría por setdefaults, pero si está vacío...
+        pass
+    
+    _d = cfg.get("data", {})
+    _ds = cfg.get("dataset", {})
+    
+    # Validar time_col si strict_time es True (default)
+    _strict = _d.get("strict_time", True)
+    _tcol = _d.get("time_col", "ds")
+    if _strict and not _tcol:
+        print("[WARN] strict_time=True pero no se definió 'time_col'. Se asumirá 'ds' o autodetect.")
+
+    # Validar que si no se pide build, exista path
+    if args.no_build or _d.get("use_prebuilt"):
+         # Check si hay algun path definido
+         _pre = _d.get("prebuilt_dir") or _d.get("prebuilt_path") or _ds.get("path")
+         if not _pre and not args.no_build: 
+             # Si no_build es false, el script intentará construir, así que no es error fatal aun.
+             pass
+         elif args.no_build and not _pre:
+             # Aquí sí es sospechoso, pero el script tiene lógica de fallback luego.
+             # Lo dejamos pasar al bloque de resolución de más abajo que ya tiene raises.
+             pass
+    
+    # Validar sim config básico
+    _sim = cfg.get("sim", {})
+    if not isinstance(_sim, dict):
+         cfg["sim"] = {}
+         print("[WARN] 'sim' no era dict, reseteado a empty.")
+    
+    # ----------------------------------
+
     # CLI domina
     if args.max_folds is not None:
         cfg["data"]["max_folds"] = int(args.max_folds)

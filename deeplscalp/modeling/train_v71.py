@@ -159,11 +159,59 @@ class InferenceSeqDataset(Dataset):
         return torch.from_numpy(x_seq), t
 
 
+
+def _normalize_model_cfg(cfg: dict) -> dict:
+    if cfg.get("model") is None:
+        cfg["model"] = {}
+    if not isinstance(cfg["model"], dict):
+        raise TypeError(f"cfg['model'] debe ser dict, no {type(cfg['model']).__name__}")
+    
+    mcfg = cfg["model"]
+    mcfg.setdefault("quantiles", [0.1, 0.5, 0.9])
+    mcfg.setdefault("d_model", 128)
+    mcfg.setdefault("nhead", 4)
+    mcfg.setdefault("num_layers", 2)
+    mcfg.setdefault("dropout", 0.10)
+    mcfg.setdefault("norm_first", False)
+    return mcfg
+
+
+def _normalize_train_cfg(cfg: dict) -> dict:
+    if cfg.get("train") is None:
+        cfg["train"] = {}
+    if not isinstance(cfg["train"], dict):
+        raise TypeError(f"cfg['train'] debe ser dict, no {type(cfg['train']).__name__}")
+
+    tcfg = cfg["train"]
+    _DEFAULT_TRAIN = {
+        "batch_size": 256,
+        "epochs": 3,
+        "lr": 3e-4,
+        "weight_decay": 0.0,
+        "grad_clip": 1.0,
+        "workers": 2,
+        "prefetch_factor": 2,
+        "seed": 7,
+        "early_stop_patience": 7,  # Adding here to be safe
+        "log_every_steps": 200,
+        "min_rel_improve": 0.005
+    }
+    for k, v in _DEFAULT_TRAIN.items():
+        tcfg.setdefault(k, v)
+        
+    tcfg.setdefault("num_workers", tcfg.get("workers", 2))
+    return tcfg
+
+
 def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: list[str], cfg: dict,
                     device: str, fold_id: int, out_dir: Path):
 
     os.makedirs(out_dir, exist_ok=True)
-
+    
+    # --- Config Normalization & Fail-Fast ---
+    mcfg = _normalize_model_cfg(cfg)
+    tcfg = _normalize_train_cfg(cfg)
+    
     # GPU optimizations
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
@@ -179,30 +227,6 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
 
     features_cfg = cfg.get("features", {}) if isinstance(cfg, dict) else {}
     seq_len = int(features_cfg.get("seq_len", 256))
-    mcfg = cfg.get("model", {})
-
-        # --- DEFAULT_TRAIN_V71_AUTOFILL (robusto / idempotente) ---
-        tcfg = (cfg.get("train") or {})
-        if not isinstance(tcfg, dict):
-            raise TypeError(f"cfg['train'] debe ser dict, no {type(tcfg).__name__}")
-
-        _DEFAULT_TRAIN = {
-            "batch_size": 256,
-            "epochs": 3,
-            "lr": 3e-4,
-            "weight_decay": 0.0,
-            "grad_clip": 1.0,
-            "workers": 2,
-            "prefetch_factor": 2,
-            "seed": 7,
-        }
-        for _k, _v in _DEFAULT_TRAIN.items():
-            tcfg.setdefault(_k, _v)
-        tcfg.setdefault("num_workers", tcfg.get("workers", 2))
-
-        # guarda de vuelta para que el resto del pipeline lo vea consistente
-        cfg["train"] = tcfg
-        # --- end DEFAULT_TRAIN_V71_AUTOFILL ---
     q_raw = mcfg.get("quantiles", [0.1, 0.5, 0.9])
     quantiles = [float(q) for q in q_raw]
 
