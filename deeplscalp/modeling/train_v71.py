@@ -180,7 +180,29 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
     features_cfg = cfg.get("features", {}) if isinstance(cfg, dict) else {}
     seq_len = int(features_cfg.get("seq_len", 256))
     mcfg = cfg.get("model", {})
-    tcfg = cfg.get("train", {})
+
+        # --- DEFAULT_TRAIN_V71_AUTOFILL (robusto / idempotente) ---
+        tcfg = (cfg.get("train") or {})
+        if not isinstance(tcfg, dict):
+            raise TypeError(f"cfg['train'] debe ser dict, no {type(tcfg).__name__}")
+
+        _DEFAULT_TRAIN = {
+            "batch_size": 256,
+            "epochs": 3,
+            "lr": 3e-4,
+            "weight_decay": 0.0,
+            "grad_clip": 1.0,
+            "workers": 2,
+            "prefetch_factor": 2,
+            "seed": 7,
+        }
+        for _k, _v in _DEFAULT_TRAIN.items():
+            tcfg.setdefault(_k, _v)
+        tcfg.setdefault("num_workers", tcfg.get("workers", 2))
+
+        # guarda de vuelta para que el resto del pipeline lo vea consistente
+        cfg["train"] = tcfg
+        # --- end DEFAULT_TRAIN_V71_AUTOFILL ---
     q_raw = mcfg.get("quantiles", [0.1, 0.5, 0.9])
     quantiles = [float(q) for q in q_raw]
 

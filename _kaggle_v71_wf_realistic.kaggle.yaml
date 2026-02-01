@@ -1,40 +1,33 @@
 pair: XRP_USDT
 tf: 5m
-
 data:
   prebuilt_dir: artifacts/datasets
   parquet_path: artifacts/datasets/train_XRP_USDT_5m_v71.parquet
   time_col: ds
   strict_time: true
-
 sim:
-  # Realismo mínimo (ajusta con tu exchange real)
   spread_bps: 5.0
   slippage_bps: 2.0
   fee_bps: 4.0
-  # Binance XRPUSDT típicamente tick=0.0001, step=1 (depende)
   tick_size: 0.0001
   step_size: 1.0
   min_hold_bars: 1
-  # Si existe futures en tu sim: funding/liq (si no, ignora)
   funding_bps_per_8h: 0.0
-
+  exec_lag: 1
 features:
   seq_len: 128
-
 model:
   name: itransformer
   d_model: 128
   n_heads: 8
   n_layers: 4
   dropout: 0.1
-
-  # FIX requerido por train_v71.py
-  quantiles: [0.1, 0.5, 0.9]
-
+  quantiles:
+  - 0.1
+  - 0.5
+  - 0.9
 labels:
   vol_scaled: true
-
 train:
   epochs: 80
   batch_size: 256
@@ -45,11 +38,11 @@ train:
   prefetch_factor: 2
   pin_memory: true
   persistent_workers: true
-  # Kaggle WF stability: workers and prefetch_factor for DataLoader
-
+  grad_clip: 1.0
+  seed: 7
+  num_workers: 2
 tuning:
   n_trials: 30
-
 objective:
   min_trades: 200
   pf_cap: 10.0
