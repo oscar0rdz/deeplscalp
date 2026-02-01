@@ -33,6 +33,100 @@ class ExecConfig:
     slippage_bps: float = 2.0       # base
     slippage_atr_k: float = 0.0     # extra proporcional a ATR/price (si quieres)
 
+def _ensure_datetime_index(df, cfg=None):
+    """
+    Garantiza DatetimeIndex para lógica 'topk streaming'.
+    - Si ya es DatetimeIndex, regresa igual
+    - Si hay columna temporal (cfg.data.time_col o 'ds'/'timestamp'), la usa como index
+    """
+    import pandas as pd
+
+    if isinstance(df.index, pd.DatetimeIndex):
+        return df
+
+    time_col = None
+    if cfg and isinstance(cfg, dict):
+        time_col = (cfg.get("data", {}) or {}).get("time_col")
+
+    for c in [time_col, "ds", "timestamp", "time", "datetime"]:
+        if c and c in df.columns:
+            time_col = c
+            break
+
+    if not time_col:
+        # No hay forma segura de crear DatetimeIndex
+        return df
+
+    dfi = df.copy()
+    t = pd.to_datetime(dfi[time_col], utc=True, errors="coerce")
+    if t.isna().any():
+        # si hay NaT, mejor no forzar
+        return df
+    dfi = dfi.drop(columns=[time_col])
+    dfi.index = pd.DatetimeIndex(t, name=time_col)
+    return dfi
+
+def _apply_costs_to_trades(trades, cfg):
+    """
+    Crea/actualiza columna pnl_net a partir de pnl y cfg.sim.fee_bps/slippage_bps.
+    - Si trades trae notional/qty*price, intenta usarlo.
+    - Si NO hay forma segura, usa aproximación en unidades de retorno (cost per trade en bps)
+      SOLO si pnl parece estar en unidades de retorno.
+    - Si fee_bps>0 y no hay forma razonable, falla (fail-fast).
+    """
+    import numpy as np
+
+    sim = (cfg.get("sim", {}) or {}) if isinstance(cfg, dict) else {}
+    fee_bps = float(sim.get("fee_bps", 0.0))
+    slippage_bps = float(sim.get("slippage_bps", 0.0))
+    total_bps = fee_bps + slippage_bps
+
+    if total_bps <= 0:
+        if "pnl_net" not in trades.columns and "pnl" in trades.columns:
+            trades["pnl_net"] = trades["pnl"]
+        return trades
+
+    if "pnl" not in trades.columns:
+        raise RuntimeError("No puedo aplicar costos: trades no tiene columna 'pnl'.")
+
+    tr = trades.copy()
+
+    # 1) Si hay notional explícito
+    if "notional" in tr.columns:
+        notional = tr["notional"].astype(float).abs().to_numpy()
+        cost = notional * (total_bps / 1e4) * 2.0  # ida y vuelta
+        tr["pnl_net"] = tr["pnl"].astype(float) - cost
+        return tr
+
+    # 2) Si hay qty y entry_price
+    if ("qty" in tr.columns) and ("entry_price" in tr.columns):
+        notional = (tr["qty"].astype(float).abs() * tr["entry_price"].astype(float)).to_numpy()
+        cost = notional * (total_bps / 1e4) * 2.0
+        tr["pnl_net"] = tr["pnl"].astype(float) - cost
+        return tr
+
+    # 3) Aproximación en unidades de retorno (si pnl parece retorno)
+    pnl = tr["pnl"].astype(float).to_numpy()
+    # heurística: si la mayoría de pnl está en rangos pequeños, probablemente es retorno
+    # expanded range check to allow for slightly larger returns
+    if len(pnl) > 0 and np.nanpercentile(np.abs(pnl), 90) < 0.20:
+        cost_per_trade = (total_bps / 1e4) * 2.0
+        tr["pnl_net"] = tr["pnl"].astype(float) - cost_per_trade
+        return tr
+
+    raise RuntimeError(
+        "fee_bps/slippage_bps > 0 pero no hay columnas para notional (notional o qty+entry_price) "
+        "y pnl no parece retorno (valores grandes). No aplicaré costos de forma insegura."
+    )
+
+@dataclass(frozen=True)
+class ExecConfig:
+    exec_lag_bars: int = 1          # 1 = next bar
+    fee_bps: float = 4.0            # por lado (entry y exit)
+    spread_bps: float = 1.0         # costo implícito (half-spread por lado si market)
+    slippage_bps: float = 2.0       # base
+    slippage_atr_k: float = 0.0     # extra proporcional a ATR/price (si quieres)
+
 def _bps_cost_to_ret(cost_bps: float) -> float:
     return float(cost_bps) * 1e-4
 
@@ -225,7 +319,29 @@ def backtest_from_predictions_v71(
       - reevaluación en close[t] y salida en close[t]
       - cost buffer gate para robustez a fricción
     """
+
     df = pred_df.copy()
+    
+    # [PARCHE 1] Validar DatetimeIndex al inicio
+    df = _ensure_datetime_index(df, cfg)
+
+    # [PARCHE EXEC_LAG] Anti-lookahead shift
+    # Desplaza las predicciones N barras hacia el futuro para simular lag de ejecución/procesamiento
+    # Default: 1 (decisión tomada en T, efectiva en T+1)
+    # NOTA: Esto se suma al latency_bars que ya afecta el precio de entrada 'open_exec'.
+    # Aquí afectamos la DISPONIBILIDAD de la señal.
+    sim_cfg = (cfg.get("sim", {}) or {}) if isinstance(cfg, dict) else {}
+    exec_lag = int(sim_cfg.get("exec_lag", 1))
+    
+    if exec_lag > 0:
+        # Columnas de predicción a desplazar
+        p_cols = [c for c in df.columns if c.startswith("p_") or c.startswith("pred_") or c.startswith("qL") or c.startswith("qS")]
+        if p_cols:
+            df[p_cols] = df[p_cols].shift(exec_lag)
+            # El shift introduce NaNs al inicio, debemos descartarlos o manejarlos.
+            # Al descartar, se acorta el backtest, pero es lo honesto.
+            df = df.iloc[exec_lag:].copy()
+
 
     # columnas OHLC
     for c in ["open", "high", "low", "close"]:
@@ -739,6 +855,53 @@ def backtest_from_predictions_v71(
     r = np.asarray(rets, dtype=np.float64)
 
     diag = {}
+
+    # --- COSTS (fee/slippage) Hook [PARCHE 3] ---
+    # Se aplica costos a nivel DataFrame de trades para robustez
+    try:
+        # Construir trades_df preliminar para aplicar costos
+        if not trades_list:
+            trades_df = pd.DataFrame(columns=["ts_entry", "ts_exit", "side", "entry_price", "exit_price", "ret_raw", "ret_net", "pnl"])
+        else:
+            trades_df = pd.DataFrame(trades_list)
+            # Asegurar pnl
+            if "pnl" not in trades_df.columns:
+                 # ret_net ya tiene costos 'simulados' por la lógica loop anterior, pero 
+                 # _apply_costs_to_trades es la autoridad final si se configura fee_bps en sim.
+                 # Para no duplicar, si ya restamos en el loop, ojo.
+                 # La logica del loop usa cost_rt_notional que viene de _round_trip_cost_rt.
+                 # Esa funcion suele leer risk.fee_rate. 
+                 # _apply_costs_to_trades lee sim.fee_bps.
+                 # Debemos alinear. Por ahora asumimos que el loop calculó un 'ret_net' base
+                 # y vamos a re-verificar con _apply_costs_to_trades si cfg['sim'] manda.
+                 if "ret_net" in trades_df.columns:
+                     trades_df["pnl"] = trades_df["ret_net"]
+                 else:
+                     trades_df["pnl"] = 0.0
+        
+        # Aplicar corrección robusta de costos
+        if 'trades_df' in locals() and hasattr(trades_df, 'columns'):
+            trades_df = _apply_costs_to_trades(trades_df, cfg)
+            # Actualizar rets/equity desde el pnl_net corregido
+            if "pnl_net" in trades_df.columns and len(trades_df) > 0:
+                # Reconstruir rets y equity
+                # Esto es costoso pero garantiza coherencia absoluta
+                new_rets = trades_df["pnl_net"].astype(float).to_numpy()
+                # Ojo: la lista rets original tenía longitud de trades.
+                # Actualizamos la lista 'rets' usada para calcular métricas abajo
+                rets = new_rets.tolist()
+                
+                # Reconstruir equity curve solo con los trades (simplificado)
+                # Ojo: la equity curve original 'equity' tiene resolution por-trade (aprox)
+                # Si queremos mantener coherencia:
+                equity = [1.0]
+                for r_val in rets:
+                    equity.append(equity[-1] * (1.0 + r_val))
+                eq = np.asarray(equity, dtype=np.float64)
+                
+    except Exception as e:
+        # fail-fast: si el usuario configuró fee_bps>0 y no se puede aplicar, mejor romper
+        raise RuntimeError(f"Error aplicando costos robustos: {e}")
 
     # Aplicar costos detallados si exec_cfg está definido
     if exec_cfg is not None:

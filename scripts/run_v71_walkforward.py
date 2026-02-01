@@ -498,6 +498,114 @@ def pipeline_build(args):
     subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
 
 
+def recompute_walkforward_summary_from_artifacts(summary_csv: str, reports_dir: str, out_csv: str = None):
+    """
+    Recalcula net/mdd/winrate/n_trades/equity_final/PF desde artefactos de cada fold.
+    Prioridad:
+      - fold_k/trades.csv
+      - equity: fold_k/equity.csv si existe; si no, reconstruye equity = 1 + cumsum(pnl_net o pnl)
+    """
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+
+    def max_drawdown(equity):
+        equity = np.asarray(equity, dtype=float)
+        peak = np.maximum.accumulate(equity)
+        dd = (peak - equity) / np.where(peak == 0, np.nan, peak)
+        return float(np.nanmax(dd))
+
+    def profit_factor(pnl):
+        pnl = np.asarray(pnl, dtype=float)
+        gp = pnl[pnl > 0].sum()
+        gl = -pnl[pnl < 0].sum()
+        if gl <= 1e-12:
+            return float("nan")
+        return float(gp / gl)
+
+    s = pd.read_csv(summary_csv)
+    rep = Path(reports_dir)
+
+    rows = []
+    for fold in s["fold"].tolist():
+        fdir = rep / f"fold_{int(fold)}"
+        tr_path = fdir / "trades.csv"
+        # Fallback to best_trades if trades.csv currently missing (depends on how tuning saves it)
+        # But 'trades.csv' should be the one from the chosen trial.
+        # Check if 'trades.csv' exists, if not maybe 'best_trades.csv' IS the one.
+        if not tr_path.exists():
+             if (fdir / "best_trades.csv").exists():
+                 tr_path = fdir / "best_trades.csv"
+             else:
+                 print(f"[WARN] Falta {tr_path} y best_trades.csv")
+                 continue
+
+        tr = pd.read_csv(tr_path)
+        pnl_col = "pnl_net" if "pnl_net" in tr.columns else ("pnl" if "pnl" in tr.columns else None)
+        if pnl_col is None:
+            # Try ret_net
+            pnl_col = "ret_net" if "ret_net" in tr.columns else None
+            
+        if pnl_col is None:
+            print(f"[SKIP] {tr_path} no tiene pnl/pnl_net/ret_net")
+            continue
+
+        pnl = tr[pnl_col].astype(float).to_numpy()
+        ntr = int(len(tr))
+        wr = float((pnl > 0).mean()) if ntr else 0.0
+        pf = profit_factor(pnl)
+
+        eq_path = fdir / "equity.csv"
+        if not eq_path.exists():
+            eq_path = fdir / "best_equity.csv"
+
+        if eq_path.exists():
+            eq = pd.read_csv(eq_path)
+            # detecta columna equity
+            eq_col = None
+            for c in ["equity","eq","balance","equity_curve"]:
+                if c in eq.columns:
+                    eq_col = c
+                    break
+            if eq_col is None:
+                # 1 col numérica
+                num_cols = [c for c in eq.columns if np.issubdtype(eq[c].dtype, np.number)]
+                eq_col = num_cols[0] if len(num_cols)==1 else None
+            
+            if eq_col:
+                equity = eq[eq_col].astype(float).to_numpy()
+            else:
+                equity = 1.0 + np.cumsum(pnl)
+        else:
+            # reconstrucción consistente: equity inicia en 1
+            equity = 1.0 + np.cumsum(pnl)
+
+        net = float(equity[-1] - equity[0]) if len(equity) else 0.0
+        mdd = max_drawdown(equity) if len(equity) else 0.0
+        eq_final = float(equity[-1]) if len(equity) else 1.0
+
+        rows.append({
+            "fold": int(fold),
+            "net": net,
+            "mdd": mdd,
+            "profit_factor_raw": pf,
+            "profit_factor_recalc": pf, 
+            "n_trades": ntr,
+            "winrate": wr,
+            "equity_final": eq_final,
+        })
+
+    s2 = s.copy()
+    if rows:
+        rr = pd.DataFrame(rows)
+        # Merge on fold
+        s2 = s2.drop(columns=[c for c in rr.columns if c in s2.columns and c!="fold"], errors="ignore").merge(rr, on="fold", how="left")
+
+    out = out_csv or summary_csv
+    s2.to_csv(out, index=False)
+    print(f"[OK] recomputed summary -> {out}")
+
+
 def sanitize_walkforward_summary(summary_csv: str, sane_csv: str, min_trades=DEFAULT_MIN_TRADES, pf_cap=DEFAULT_PF_CAP):
     p = Path(summary_csv)
     if not p.exists():
@@ -827,8 +935,15 @@ def main() -> None:
     sanitize_walkforward_summary(
         str(out_dir / "reports" / "walkforward_summary.csv"),
         str(out_dir / "reports" / "walkforward_summary_sane.csv"),
-        min_trades=cfg.get("objective", {}).get("min_trades", DEFAULT_MIN_TRADES),
-        pf_cap=cfg.get("objective", {}).get("pf_cap", DEFAULT_PF_CAP),
+        min_trades=200,
+        pf_cap=10.0,
+    )
+    
+    # --- AUDIT: recompute summary from artifacts to avoid VAL/TEST mix ---
+    recompute_walkforward_summary_from_artifacts(
+        str(out_dir / "reports" / "walkforward_summary.csv"),
+        str(out_dir / "reports"),
+        out_csv=str(out_dir / "reports" / "walkforward_summary_audited.csv"),
     )
 
 
