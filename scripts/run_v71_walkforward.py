@@ -36,6 +36,60 @@ def _deep_merge(a, b):
     return out
 
 
+# === V71 MDD & LEAKAGE HELPERS ===
+
+def _compute_mdd_abs(equity_series):
+    import pandas as pd
+    import numpy as np
+    eq = pd.to_numeric(pd.Series(equity_series), errors="coerce").dropna()
+    if eq.empty:
+        return float("nan")
+    peak = eq.cummax()
+    dd = (eq / peak) - 1.0
+    mdd = float(dd.min())  # negativo típico
+    return abs(mdd)        # magnitud positiva
+
+def _write_split_meta(out_dir, train_df=None, val_df=None, test_df=None, time_col="ds", cfg=None):
+    import json, hashlib
+    from pathlib import Path
+    import pandas as pd
+
+    def _minmax(df):
+        if df is None or len(df) == 0:
+            return None, None, 0
+        if time_col not in df.columns:
+            return None, None, int(len(df))
+        t = pd.to_datetime(df[time_col], errors="coerce", utc=True)
+        t = t.dropna()
+        if t.empty:
+            return None, None, int(len(df))
+        return str(t.min()), str(t.max()), int(len(df))
+
+    tr_min, tr_max, tr_n = _minmax(train_df)
+    va_min, va_max, va_n = _minmax(val_df)
+    te_min, te_max, te_n = _minmax(test_df)
+
+    cfg_txt = ""
+    try:
+        import yaml
+        cfg_txt = yaml.safe_dump(cfg) if isinstance(cfg, dict) else str(cfg)
+    except Exception:
+        cfg_txt = str(cfg)
+
+    cfg_sha = hashlib.sha256(cfg_txt.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+    meta = {
+        "time_col": time_col,
+        "train": {"min": tr_min, "max": tr_max, "n": tr_n},
+        "val":   {"min": va_min, "max": va_max, "n": va_n},
+        "test":  {"min": te_min, "max": te_max, "n": te_n},
+        "cfg_sha16": cfg_sha,
+    }
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "split_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
 def _maybe_generate_kaggle_cfg(path: Path):
     """Auto-generate _kaggle_v71_wf_tune.yaml from v71_gpu_kaggle.yaml if missing."""
     # Solo para el caso esperado
@@ -581,9 +635,26 @@ def recompute_walkforward_summary_from_artifacts(summary_csv: str, reports_dir: 
             equity = 1.0 + np.cumsum(pnl)
 
         net = float(equity[-1] - equity[0]) if len(equity) else 0.0
-        mdd = max_drawdown(equity) if len(equity) else 0.0
+        # mdd = max_drawdown(equity) if len(equity) else 0.0
+        mdd = _compute_mdd_abs(equity) if len(equity) else 0.0
         eq_final = float(equity[-1]) if len(equity) else 1.0
 
+        # --- Sanity Flags (P3) ---
+        flags = []
+        if mdd > 1.0:
+            flags.append("MDD_GT_1")
+        
+        # Check defaults for sanity
+        # Warning: we don't have cfg here easily unless passed. 
+        # Assuming defaults or relying on external audit script for fee/slip flags.
+        # But we can try heuristics if we had 'fee_sum' or 'slippage_sum' in trades.
+        # But trades.csv logic above didn't extract 'fee' or 'slippage' sum.
+        # Let's keep it simple for now or extract if cols exist.
+        if "slippage" in tr.columns:
+             slip_sum = float(tr["slippage"].sum())
+             # We assume if slippage col exists and is 0.0 but trades > 0, suspicious?
+             # Only if we KNEW slippage_bps > 0.
+        
         rows.append({
             "fold": int(fold),
             "net": net,
@@ -593,6 +664,7 @@ def recompute_walkforward_summary_from_artifacts(summary_csv: str, reports_dir: 
             "n_trades": ntr,
             "winrate": wr,
             "equity_final": eq_final,
+            "flags": "|".join(flags)
         })
 
     s2 = s.copy()
@@ -628,6 +700,8 @@ def sanitize_walkforward_summary(summary_csv: str, sane_csv: str, min_trades=DEF
     if wr_col:
         df[wr_col] = df[wr_col].clip(lower=0.0, upper=1.0)
     if mdd_col:
+        # P3: force positive mdd
+        df[mdd_col] = df[mdd_col].abs()
         df[mdd_col] = df[mdd_col].clip(lower=0.0, upper=1.0)
 
     # PF saneado
@@ -854,22 +928,18 @@ def main() -> None:
         val_df = df[(df.index >= fold["train_end"]) & (df.index < fold["val_end"])].copy()
         test_df = df[(df.index >= fold["val_end"]) & (df.index < fold["test_end"])].copy()
 
-        # --- PARCHE 3: Audit Splits (Split Meta) ---
+        # --- PARCHE 3/4: Audit Splits (Split Meta) ---
         fold_dir = out_dir / "reports" / f"fold_{fold['fold_id']}"
         _ensure_dir(fold_dir)
         
-        split_meta = {
-             "fold_id": int(fold["fold_id"]),
-             "train_range": [str(fold["train_start"]), str(fold["train_end"])],
-             "val_range": [str(fold["train_end"]), str(fold["val_end"])],
-             "test_range": [str(fold["val_end"]), str(fold["test_end"])],
-             "train_rows": len(train_df),
-             "val_rows": len(val_df),
-             "test_rows": len(test_df),
-             "feature_cols": len(feature_cols),
-        }
-        with open(fold_dir / "split_meta.json", "w") as f:
-            json.dump(split_meta, f, indent=2)
+        _write_split_meta(
+            out_dir=fold_dir,
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
+            time_col=cfg.get("data", {}).get("time_col", "ds") if isinstance(cfg, dict) else "ds",
+            cfg=cfg,
+        )
         # -------------------------------------------
 
         model, scaler = train_model_v71(

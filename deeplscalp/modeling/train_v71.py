@@ -59,8 +59,61 @@ except Exception:
     from torch.cuda.amp import autocast as _autocast
     AMP_API = "torch.cuda.amp"
 
+
 from training.itransformer_v71 import (ITransformerV71, ITransV71Config,
                                        quantile_loss)
+
+# === V71 CFG NORMALIZATION ===
+V71_CFG_NORMALIZER_MARK = "V71_CFG_NORMALIZER_V1"
+
+def v71_normalize_cfg(cfg: dict) -> dict:
+    """
+    Normaliza cfg para evitar KeyError/TypeError y garantizar defaults coherentes.
+    Idempotente: puedes llamarla múltiples veces.
+    """
+    if cfg is None:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        raise TypeError(f"cfg debe ser dict, no {type(cfg).__name__}")
+
+    # --- features ---
+    fcfg = cfg.get("features") or {}
+    if not isinstance(fcfg, dict):
+        raise TypeError(f"cfg['features'] debe ser dict, no {type(fcfg).__name__}")
+    fcfg.setdefault("seq_len", 256)
+    cfg["features"] = fcfg
+
+    # --- model ---
+    mcfg = cfg.get("model") or {}
+    if not isinstance(mcfg, dict):
+        raise TypeError(f"cfg['model'] debe ser dict, no {type(mcfg).__name__}")
+    mcfg.setdefault("quantiles", [0.1, 0.5, 0.9])
+    cfg["model"] = mcfg
+
+    # --- train ---
+    tcfg = cfg.get("train") or {}
+    if not isinstance(tcfg, dict):
+        raise TypeError(f"cfg['train'] debe ser dict, no {type(tcfg).__name__}")
+    tcfg.setdefault("batch_size", 256)
+    tcfg.setdefault("epochs", 3)
+    tcfg.setdefault("lr", 3e-4)
+    tcfg.setdefault("weight_decay", 0.0)
+    tcfg.setdefault("grad_clip", 1.0)
+    tcfg.setdefault("workers", 2)
+    tcfg.setdefault("prefetch_factor", 2)
+    tcfg.setdefault("seed", 7)
+    # compat: algunos sitios usan num_workers
+    tcfg.setdefault("num_workers", tcfg.get("workers", 2))
+    cfg["train"] = tcfg
+
+    # --- sim (no forzamos, pero aseguramos estructura dict si existe) ---
+    scfg = cfg.get("sim")
+    if scfg is None:
+        cfg["sim"] = {}
+    elif not isinstance(scfg, dict):
+        raise TypeError(f"cfg['sim'] debe ser dict, no {type(scfg).__name__}")
+
+    return cfg
 
 
 @dataclass
@@ -207,6 +260,12 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
                     device: str, fold_id: int, out_dir: Path):
 
     os.makedirs(out_dir, exist_ok=True)
+
+    # === V71 NORMALIZATION CALL ===
+    cfg = v71_normalize_cfg(cfg)
+    fcfg = cfg["features"]
+    mcfg = cfg["model"]
+    tcfg = cfg["train"]
     
     # --- Config Normalization & Fail-Fast ---
     mcfg = _normalize_model_cfg(cfg)
@@ -512,6 +571,9 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
 def predict_v71(model, scaler, df: pd.DataFrame, feature_cols: list[str], cfg: dict, device: str) -> pd.DataFrame:
     model.eval()
     
+    # === V71 NORMALIZATION CALL ===
+    cfg = v71_normalize_cfg(cfg)
+
     # --- Config Normalization (runtime) ---
     features_cfg = cfg.get("features", {}) if isinstance(cfg, dict) else {}
     if not isinstance(features_cfg, dict): features_cfg = {}

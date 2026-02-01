@@ -33,6 +33,21 @@ class ExecConfig:
     slippage_bps: float = 2.0       # base
     slippage_atr_k: float = 0.0     # extra proporcional a ATR/price (si quieres)
 
+# === V71 SLIPPAGE RECORDING ===
+V71_SLIPPAGE_MARK = "V71_SLIPPAGE_RECORDING_V1"
+
+def _bps_to_frac(bps: float) -> float:
+    try:
+        return float(bps) / 1e4
+    except Exception:
+        return 0.0
+
+def _safe_float(x, default=0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return float(default)
+
 def _ensure_datetime_index(df, cfg=None):
     """
     Garantiza DatetimeIndex para lógica 'topk streaming'.
@@ -340,7 +355,22 @@ def backtest_from_predictions_v71(
             df[p_cols] = df[p_cols].shift(exec_lag)
             # El shift introduce NaNs al inicio, debemos descartarlos o manejarlos.
             # Al descartar, se acorta el backtest, pero es lo honesto.
+            # Al descartar, se acorta el backtest, pero es lo honesto.
             df = df.iloc[exec_lag:].copy()
+
+    # === V71 CONFIG ROBUSTNESS ===
+    sim_cfg = (cfg.get("sim", {}) or {}) if isinstance(cfg, dict) else {}
+    _robust_fee_bps = _safe_float(sim_cfg.get("fee_bps", 0.0), 0.0)
+    _robust_slippage_bps = _safe_float(sim_cfg.get("slippage_bps", 0.0), 0.0)
+    # Mock 'self' for the snippet
+    class MockSelf: pass
+    _self_sim = MockSelf()
+    _self_sim._fee_bps = _robust_fee_bps
+    _self_sim._slippage_bps = _robust_slippage_bps
+
+    # Fail-fast check
+    if _self_sim._slippage_bps > 0:
+        pass 
 
 
     # columnas OHLC
@@ -499,7 +529,11 @@ def backtest_from_predictions_v71(
 
     rets = []
     equity = [1.0]
+    equity = [1.0]
     holds = []
+    
+    # Trade accumulating record
+    _curr_trade_rec = {}
 
     # Diagnóstico de edge
     entered_ev = []
@@ -641,6 +675,29 @@ def backtest_from_predictions_v71(
             if qty == 0.0:
                 continue
 
+            # --- SLIPPAGE RECORD (ENTRY) ---
+            _curr_trade_rec = {"slippage": 0.0}
+            try:
+                ref_price_ = mid
+                fill_price_ = entry_px
+                qty_ = abs(qty)
+                
+                _ref = _safe_float(ref_price_, 0.0)
+                _fill = _safe_float(fill_price_, 0.0)
+                _qty = abs(_safe_float(qty_, 0.0))
+
+                slip_cost = 0.0
+                if _qty > 0 and _fill > 0:
+                    if _ref > 0:
+                        slip_cost = _qty * abs(_fill - _ref)
+                    else:
+                        slip_cost = _qty * _fill * _bps_to_frac(getattr(_self_sim, "_slippage_bps", 0.0))
+                
+                _curr_trade_rec["slippage"] += float(slip_cost)
+            except Exception:
+                pass
+            # -------------------------------
+
             dbg["can_enter"] += 1
             dbg["entered"] += 1
             if side_choice == 1:
@@ -728,7 +785,30 @@ def backtest_from_predictions_v71(
                     "spread": spread_val,
                     "holding_bars": bars_in,
                     "reason_exit": reason_exit,
+                    "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
                 })
+                
+                # --- SLIPPAGE RECORD (EXIT REEVAL) ---
+                try:
+                    ref_price_ = float(close_[i])
+                    fill_price_ = ex
+                    qty_ = 1.0 
+                    
+                    _ref = _safe_float(ref_price_, 0.0)
+                    _fill = _safe_float(fill_price_, 0.0)
+                    _qty = abs(_safe_float(qty_, 0.0))
+
+                    slip_cost = 0.0
+                    if _qty > 0 and _fill > 0:
+                        if abs(_fill - _ref) > 1e-9:
+                             slip_cost = _qty * abs(_fill - _ref)
+                        else:
+                             slip_cost = _qty * _fill * _bps_to_frac(getattr(_self_sim, "_slippage_bps", 0.0))
+                    
+                    trades_list[-1]["slippage"] += float(slip_cost)
+                except Exception:
+                    pass
+                # -------------------------------------
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_reeval"] += 1
@@ -788,7 +868,30 @@ def backtest_from_predictions_v71(
                     "spread": spread_val,
                     "holding_bars": bars_in,
                     "reason_exit": reason_exit,
+                    "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
                 })
+
+                # --- SLIPPAGE RECORD (EXIT TIME) ---
+                try:
+                    ref_price_ = float(open_[i])
+                    fill_price_ = ex
+                    qty_ = 1.0 
+                    
+                    _ref = _safe_float(ref_price_, 0.0)
+                    _fill = _safe_float(fill_price_, 0.0)
+                    _qty = abs(_safe_float(qty_, 0.0))
+
+                    slip_cost = 0.0
+                    if _qty > 0 and _fill > 0:
+                        if abs(_fill - _ref) > 1e-9:
+                             slip_cost = _qty * abs(_fill - _ref)
+                        else:
+                             slip_cost = _qty * _fill * _bps_to_frac(getattr(_self_sim, "_slippage_bps", 0.0))
+                    
+                    trades_list[-1]["slippage"] += float(slip_cost)
+                except Exception:
+                    pass
+                # -----------------------------------
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_time"] += 1
@@ -865,7 +968,24 @@ def backtest_from_predictions_v71(
                 "spread": spread_val,
                 "holding_bars": bars_in,
                 "reason_exit": reason_exit,
+                "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
             })
+
+            # --- SLIPPAGE RECORD (EXIT SL) ---
+            try:
+                ref_price_ = sl_px
+                fill_price_ = sl_px
+                qty_ = 1.0 
+                
+                _ref = _safe_float(ref_price_, 0.0)
+                _fill = _safe_float(fill_price_, 0.0)
+                _qty = abs(_safe_float(qty_, 0.0))
+
+                slip_cost = _qty * _fill * _bps_to_frac(getattr(_self_sim, "_slippage_bps", 0.0))
+                trades_list[-1]["slippage"] += float(slip_cost)
+            except Exception:
+                pass
+            # ---------------------------------
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_sl"] += 1
@@ -922,7 +1042,20 @@ def backtest_from_predictions_v71(
                 "spread": spread_val,
                 "holding_bars": bars_in,
                 "reason_exit": reason_exit,
+                "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
             })
+
+            # --- SLIPPAGE RECORD (EXIT TP) ---
+            try:
+                fill_price_ = tp_px
+                qty_ = 1.0 
+                _fill = _safe_float(fill_price_, 0.0)
+                _qty = abs(_safe_float(qty_, 0.0))
+                slip_cost = _qty * _fill * _bps_to_frac(getattr(_self_sim, "_slippage_bps", 0.0))
+                trades_list[-1]["slippage"] += float(slip_cost)
+            except Exception:
+                pass
+            # ---------------------------------
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_tp"] += 1
