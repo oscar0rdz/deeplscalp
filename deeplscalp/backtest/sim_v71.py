@@ -682,11 +682,30 @@ def backtest_from_predictions_v71(
                     notional = (ex / (entry_px + EPS)) - 1.0
                 else:
                     notional = (entry_px - ex) / (entry_px + EPS)
-                # ret_raw = notional * leverage * risk_fraction
-                # ret_net = ret_raw - (cost_rt_notional * leverage * risk_fraction)
-                trade_ret_raw = notional * leverage * risk_fraction
-                trade_ret_net = trade_ret_raw - (cost_rt_notional * leverage * risk_fraction)
                 
+                # --- Cost Logic ---
+                if exec_cfg:
+                    _fee_bps = exec_cfg.fee_bps
+                    _slip_bps = exec_cfg.slippage_bps
+                    _spread_bps = exec_cfg.spread_bps
+                else:
+                    _fee_bps = 4.0
+                    _spread_bps = float(thresholds.get("spread_bps", 1.0))
+                    _slip_bps = float(thresholds.get("slippage_bps", 2.0))
+                
+                _cm = cost_mult
+                pos_val = abs(notional * leverage * risk_fraction)
+                
+                fee_val = pos_val * (_fee_bps * 1e-4) * 2.0 * _cm
+                slip_val = pos_val * (_slip_bps * 1e-4) * 2.0 * _cm
+                spread_val = pos_val * (_spread_bps * 1e-4) * 2.0 * _cm
+                
+                total_cost_val = fee_val + slip_val + spread_val
+                
+                trade_ret_raw = notional * leverage * risk_fraction
+                trade_ret_net = trade_ret_raw - total_cost_val
+                # ------------------
+
                 rets.append(trade_ret_net)
                 equity.append(equity[-1] * (1.0 + trade_ret_net))
                 holds.append(bars_in)
@@ -694,9 +713,6 @@ def backtest_from_predictions_v71(
                 ts_entry = df.index[entry_i]
                 ts_exit = df.index[i]
                 
-                fee = cost_rt_notional * leverage * risk_fraction * 0.5  # approx per side
-                spread = 0.0  # not detailed
-                slip = 0.0
                 reason_exit = "reeval"
                 trades_list.append({
                     "ts_entry": ts_entry,
@@ -707,9 +723,9 @@ def backtest_from_predictions_v71(
                     "ret_raw": trade_ret_raw,
                     "ret_net": trade_ret_net,
                     "pnl": trade_ret_net,  # compatibility alias
-                    "fee": fee,
-                    "slippage": slip,
-                    "spread": spread,
+                    "fee": fee_val,
+                    "slippage": slip_val,
+                    "spread": spread_val,
                     "holding_bars": bars_in,
                     "reason_exit": reason_exit,
                 })
@@ -727,8 +743,28 @@ def backtest_from_predictions_v71(
                 else:
                     notional = (entry_px - ex) / (entry_px + EPS)
                 
+                # --- Cost Logic ---
+                if exec_cfg:
+                    _fee_bps = exec_cfg.fee_bps
+                    _slip_bps = exec_cfg.slippage_bps
+                    _spread_bps = exec_cfg.spread_bps
+                else:
+                    _fee_bps = 4.0
+                    _spread_bps = float(thresholds.get("spread_bps", 1.0))
+                    _slip_bps = float(thresholds.get("slippage_bps", 2.0))
+                
+                _cm = cost_mult
+                pos_val = abs(notional * leverage * risk_fraction)
+                
+                fee_val = pos_val * (_fee_bps * 1e-4) * 2.0 * _cm
+                slip_val = pos_val * (_slip_bps * 1e-4) * 2.0 * _cm
+                spread_val = pos_val * (_spread_bps * 1e-4) * 2.0 * _cm
+                
+                total_cost_val = fee_val + slip_val + spread_val
+                
                 trade_ret_raw = notional * leverage * risk_fraction
-                trade_ret_net = trade_ret_raw - (cost_rt_notional * leverage * risk_fraction)
+                trade_ret_net = trade_ret_raw - total_cost_val
+                # ------------------
 
                 rets.append(trade_ret_net)
                 equity.append(equity[-1] * (1.0 + trade_ret_net))
@@ -737,9 +773,6 @@ def backtest_from_predictions_v71(
                 ts_entry = df.index[entry_i]
                 ts_exit = df.index[i]
                 
-                fee = cost_rt_notional * leverage * risk_fraction * 0.5
-                spread = 0.0
-                slip = 0.0
                 reason_exit = "time"
                 trades_list.append({
                     "ts_entry": ts_entry,
@@ -750,9 +783,9 @@ def backtest_from_predictions_v71(
                     "ret_raw": trade_ret_raw,
                     "ret_net": trade_ret_net,
                     "pnl": trade_ret_net,
-                    "fee": fee,
-                    "slippage": slip,
-                    "spread": spread,
+                    "fee": fee_val,
+                    "slippage": slip_val,
+                    "spread": spread_val,
                     "holding_bars": bars_in,
                     "reason_exit": reason_exit,
                 })
@@ -773,13 +806,42 @@ def backtest_from_predictions_v71(
 
         # ambigüedad intrabar => SL primero (conservador)
         if sl_hit:
+            # Cost breakdown (Unificado)
+            # bps -> rate per side. RT = 2 * side
+            if exec_cfg:
+                _fee_bps = exec_cfg.fee_bps
+                _slip_bps = exec_cfg.slippage_bps
+                _spread_bps = exec_cfg.spread_bps
+            else:
+                # Fallbacks from thresholds or defaults
+                _fee_bps = 4.0 # default assumption
+                _spread_bps = float(thresholds.get("spread_bps", 1.0))
+                _slip_bps = float(thresholds.get("slippage_bps", 2.0))
+            
+            # Ajuste de scope: si cost_mult != 1.0, escalamos costos
+            _cm = cost_mult
+            
+            # Cost rates (absolute sum per round trip approx)
+            # fee is usually linear on notional. spread/slip relative to price ~ linear on notional.
+            # We apply them as deduction from ret_raw.
+            
+            # Calculation based on notional * leverage (total position value)
             if side == 1:
                 notional = (sl_px / (entry_px + EPS)) - 1.0
             else:
                 notional = (entry_px - sl_px) / (entry_px + EPS)
+                
+            pos_val = abs(notional * leverage * risk_fraction)
+            
+            # RT costs (2x per side)
+            fee_val = pos_val * (_fee_bps * 1e-4) * 2.0 * _cm
+            slip_val = pos_val * (_slip_bps * 1e-4) * 2.0 * _cm
+            spread_val = pos_val * (_spread_bps * 1e-4) * 2.0 * _cm
+            
+            total_cost_val = fee_val + slip_val + spread_val
             
             trade_ret_raw = notional * leverage * risk_fraction
-            trade_ret_net = trade_ret_raw - (cost_rt_notional * leverage * risk_fraction)
+            trade_ret_net = trade_ret_raw - total_cost_val
             
             rets.append(trade_ret_net)
             equity.append(equity[-1] * (1.0 + trade_ret_net))
@@ -788,9 +850,6 @@ def backtest_from_predictions_v71(
             ts_entry = df.index[entry_i]
             ts_exit = df.index[i]
             
-            fee = cost_rt_notional * leverage * risk_fraction * 0.5
-            spread = 0.0
-            slip = 0.0
             reason_exit = "sl"
             trades_list.append({
                 "ts_entry": ts_entry,
@@ -801,9 +860,9 @@ def backtest_from_predictions_v71(
                 "ret_raw": trade_ret_raw,
                 "ret_net": trade_ret_net,
                 "pnl": trade_ret_net,
-                "fee": fee,
-                "slippage": slip,
-                "spread": spread,
+                "fee": fee_val,
+                "slippage": slip_val,
+                "spread": spread_val,
                 "holding_bars": bars_in,
                 "reason_exit": reason_exit,
             })
@@ -818,9 +877,29 @@ def backtest_from_predictions_v71(
             else:
                 notional = (entry_px - tp_px) / (entry_px + EPS)
             
-            trade_ret_raw = notional * leverage * risk_fraction
-            trade_ret_net = trade_ret_raw - (cost_rt_notional * leverage * risk_fraction)
+            # --- Cost Logic ---
+            if exec_cfg:
+                _fee_bps = exec_cfg.fee_bps
+                _slip_bps = exec_cfg.slippage_bps
+                _spread_bps = exec_cfg.spread_bps
+            else:
+                _fee_bps = 4.0
+                _spread_bps = float(thresholds.get("spread_bps", 1.0))
+                _slip_bps = float(thresholds.get("slippage_bps", 2.0))
             
+            _cm = cost_mult
+            pos_val = abs(notional * leverage * risk_fraction)
+            
+            fee_val = pos_val * (_fee_bps * 1e-4) * 2.0 * _cm
+            slip_val = pos_val * (_slip_bps * 1e-4) * 2.0 * _cm
+            spread_val = pos_val * (_spread_bps * 1e-4) * 2.0 * _cm
+            
+            total_cost_val = fee_val + slip_val + spread_val
+            
+            trade_ret_raw = notional * leverage * risk_fraction
+            trade_ret_net = trade_ret_raw - total_cost_val
+            # ------------------
+
             rets.append(trade_ret_net)
             equity.append(equity[-1] * (1.0 + trade_ret_net))
             holds.append(bars_in)
@@ -828,9 +907,6 @@ def backtest_from_predictions_v71(
             ts_entry = df.index[entry_i]
             ts_exit = df.index[i]
             
-            fee = cost_rt_notional * leverage * risk_fraction * 0.5
-            spread = 0.0
-            slip = 0.0
             reason_exit = "tp"
             trades_list.append({
                 "ts_entry": ts_entry,
@@ -841,9 +917,9 @@ def backtest_from_predictions_v71(
                 "ret_raw": trade_ret_raw,
                 "ret_net": trade_ret_net,
                 "pnl": trade_ret_net,
-                "fee": fee,
-                "slippage": slip,
-                "spread": spread,
+                "fee": fee_val,
+                "slippage": slip_val,
+                "spread": spread_val,
                 "holding_bars": bars_in,
                 "reason_exit": reason_exit,
             })
@@ -861,9 +937,13 @@ def backtest_from_predictions_v71(
     # ---------------------------------------------------------
     # 1. Construir trades_df base
     if not trades_list:
-        trades_df = pd.DataFrame(columns=["ts_entry", "ts_exit", "side", "entry_price", "exit_price", "ret_raw", "ret_net", "pnl"])
+        trades_df = pd.DataFrame(columns=["ts_entry", "ts_exit", "side", "entry_price", "exit_price", "ret_raw", "ret_net", "pnl", "pnl_net"])
     else:
         trades_df = pd.DataFrame(trades_list)
+        # Ensure pnl_net exists if we calculated it in loop (ret_net)
+        if "ret_net" in trades_df.columns and "pnl_net" not in trades_df.columns:
+             trades_df["pnl_net"] = trades_df["ret_net"]
+
         if "pnl" not in trades_df.columns:
              if "ret_net" in trades_df.columns:
                  trades_df["pnl"] = trades_df["ret_net"]
@@ -871,10 +951,11 @@ def backtest_from_predictions_v71(
                  trades_df["pnl"] = 0.0
 
     # 2. Aplicar costos robustos desde cfg.sim.fee_bps (Autoritativo)
-    # Esto actualiza/crea 'pnl_net' en trades_df
+    # Solo si NO tenemos ya pnl_net calculado (e.g. lógica legacy)
     try:
         if hasattr(trades_df, 'columns'):
-            trades_df = _apply_costs_to_trades(trades_df, cfg)
+            if "pnl_net" not in trades_df.columns:
+                 trades_df = _apply_costs_to_trades(trades_df, cfg)
     except Exception as e:
         raise RuntimeError(f"Error aplicando costos robustos: {e}")
 
@@ -890,6 +971,8 @@ def backtest_from_predictions_v71(
         equity = [1.0]
         for val in rets:
             equity.append(equity[-1] * (1.0 + val))
+        eq = np.asarray(equity, dtype=np.float64)
+    else:
         eq = np.asarray(equity, dtype=np.float64)
 
     # 4. Log diagnóstico de costos detallados (Legacy / ExecCfg)

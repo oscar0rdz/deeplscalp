@@ -854,6 +854,24 @@ def main() -> None:
         val_df = df[(df.index >= fold["train_end"]) & (df.index < fold["val_end"])].copy()
         test_df = df[(df.index >= fold["val_end"]) & (df.index < fold["test_end"])].copy()
 
+        # --- PARCHE 3: Audit Splits (Split Meta) ---
+        fold_dir = out_dir / "reports" / f"fold_{fold['fold_id']}"
+        _ensure_dir(fold_dir)
+        
+        split_meta = {
+             "fold_id": int(fold["fold_id"]),
+             "train_range": [str(fold["train_start"]), str(fold["train_end"])],
+             "val_range": [str(fold["train_end"]), str(fold["val_end"])],
+             "test_range": [str(fold["val_end"]), str(fold["test_end"])],
+             "train_rows": len(train_df),
+             "val_rows": len(val_df),
+             "test_rows": len(test_df),
+             "feature_cols": len(feature_cols),
+        }
+        with open(fold_dir / "split_meta.json", "w") as f:
+            json.dump(split_meta, f, indent=2)
+        # -------------------------------------------
+
         model, scaler = train_model_v71(
             train_df.reset_index(drop=True),
             val_df.reset_index(drop=True),

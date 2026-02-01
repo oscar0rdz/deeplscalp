@@ -511,21 +511,34 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
 
 def predict_v71(model, scaler, df: pd.DataFrame, feature_cols: list[str], cfg: dict, device: str) -> pd.DataFrame:
     model.eval()
-    seq_len = int(cfg["features"]["seq_len"])
-    quantiles = [float(q) for q in cfg["model"]["quantiles"]]
+    
+    # --- Config Normalization (runtime) ---
+    features_cfg = cfg.get("features", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(features_cfg, dict): features_cfg = {}
+    seq_len = int(features_cfg.get("seq_len", 256))
+    
+    mcfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(mcfg, dict): mcfg = {}
+    q_raw = mcfg.get("quantiles", [0.1, 0.5, 0.9])
+    quantiles = [float(q) for q in q_raw]
+    
+    train_cfg = cfg.get("train", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(train_cfg, dict): train_cfg = {}
+    batch_size = int(train_cfg.get("batch_size", 256))
+    workers = int(cfg.get("dataloader_workers", train_cfg.get("workers", 0)))
+
 
     df = df.dropna()
     X = df[feature_cols].astype("float32").values
     Xs = scaler.transform2d(X)
 
     ds = InferenceSeqDataset(df, Xs, seq_len=seq_len)
-    workers = int(cfg.get("dataloader_workers", 0))
     if workers < 0:
         workers = 0
 
     dl = DataLoader(
         ds,
-        batch_size=int(cfg["train"]["batch_size"]),
+        batch_size=batch_size,
         shuffle=False,
         drop_last=False,
         num_workers=workers,
