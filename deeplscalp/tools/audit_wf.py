@@ -11,6 +11,13 @@ from deeplscalp.reporting.metrics import compute_fold_metrics
 def load_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path) if path.exists() else pd.DataFrame()
 
+def normalize_fold(x):
+    # soporta "0", 0, 0.0, "0.0"
+    try:
+        return int(float(x))
+    except:
+        return x
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--reports", type=str, default="artifacts/reports", help="ruta a artifacts/reports")

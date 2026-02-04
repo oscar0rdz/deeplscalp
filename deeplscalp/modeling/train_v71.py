@@ -216,10 +216,10 @@ class InferenceSeqDataset(Dataset):
 def _normalize_model_cfg(cfg: dict) -> dict:
     if cfg.get("model") is None:
         cfg["model"] = {}
-    if not isinstance(cfg["model"], dict):
+    if not isinstance((cfg.get("model") or {}), dict):
         raise TypeError(f"cfg['model'] debe ser dict, no {type(cfg['model']).__name__}")
     
-    mcfg = cfg["model"]
+    mcfg = (cfg.get("model") or {})
     mcfg.setdefault("quantiles", [0.1, 0.5, 0.9])
     mcfg.setdefault("d_model", 128)
     mcfg.setdefault("nhead", 4)
@@ -232,10 +232,10 @@ def _normalize_model_cfg(cfg: dict) -> dict:
 def _normalize_train_cfg(cfg: dict) -> dict:
     if cfg.get("train") is None:
         cfg["train"] = {}
-    if not isinstance(cfg["train"], dict):
+    if not isinstance((cfg.get("train") or {}), dict):
         raise TypeError(f"cfg['train'] debe ser dict, no {type(cfg['train']).__name__}")
 
-    tcfg = cfg["train"]
+    tcfg = (cfg.get("train") or {})
     _DEFAULT_TRAIN = {
         "batch_size": 256,
         "epochs": 3,
@@ -263,9 +263,9 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
 
     # === V71 NORMALIZATION CALL ===
     cfg = v71_normalize_cfg(cfg)
-    fcfg = cfg["features"]
-    mcfg = cfg["model"]
-    tcfg = cfg["train"]
+    fcfg = (cfg.get("features") or {})
+    mcfg = (cfg.get("model") or {})
+    tcfg = (cfg.get("train") or {})
     
     # --- Config Normalization & Fail-Fast ---
     mcfg = _normalize_model_cfg(cfg)

@@ -45,9 +45,13 @@ def _compute_mdd_abs(equity_series):
     if eq.empty:
         return float("nan")
     peak = eq.cummax()
-    dd = (eq / peak) - 1.0
-    mdd = float(dd.min())  # negativo típico
-    return abs(mdd)        # magnitud positiva
+    # DD = (Peak - Value) / Peak
+    # If peak <= 0 (unlikely for proper equity starting at 1.0), handle validly
+    dd = (peak - eq) / peak
+    mdd = float(dd.max())          # Positive magnitude
+    if mdd > 1.0 or not np.isfinite(mdd):
+        return 1.0
+    return abs(mdd)
 
 def _write_split_meta(out_dir, train_df=None, val_df=None, test_df=None, time_col="ds", cfg=None):
     import json, hashlib
@@ -139,8 +143,9 @@ def _maybe_generate_kaggle_cfg(path: Path):
 
 import math
 
+import shutil
 from deeplscalp.backtest.sim_v71 import (backtest_from_predictions_v71,
-                                         profit_factor_stats)
+                                         profit_factor_stats, add_trade_id)
 from deeplscalp.modeling.calibration_v71 import (apply_temperature_multiclass,
                                                  fit_temperature_multiclass)
 from deeplscalp.modeling.train_v71 import predict_v71, train_model_v71
@@ -189,8 +194,10 @@ def compute_objective(pnls, equity_curve, n_trades, cfg):
     pf_val = pf.pf_capped
     
     # Hard constraints (solo aquí castigos grandes)
+    # Hard constraints (solo aquí castigos grandes)
     if n_trades < min_trades:
-        return -1e6 + float(n_trades), pf, mdd, equity_final
+        # [PATCH C] Guardrail: si no hay MIN_TRADES, penalización masiva (-1e9)
+        return -1e9 - float(min_trades - n_trades), pf, mdd, equity_final
 
     if not np.isfinite(net) or not np.isfinite(mdd) or not np.isfinite(pf_val):
         return -1e6, pf, mdd, equity_final
@@ -421,7 +428,7 @@ def _pick(met: dict, keys: List[str], default=0.0):
     return default
 
 
-def objective_factory(cfg: dict, pred_val: pd.DataFrame, **kwargs):
+def objective_factory(cfg: dict, pred_val: pd.DataFrame, fold_dir: Path = None, **kwargs):
     # Ajusta esta línea a como lo tengas actualmente:
     obj_cfg = cfg.get("objective", cfg.get("tuning", {}).get("objective", {}))
 
@@ -468,18 +475,32 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, **kwargs):
             "score_q": score_q,
             "q_width_max": q_width_max,
             "ev_abs_min": ev_buffer,
-            "top_k": top_k,
+            "topk_frac": topk_frac,  # [PATCH] Pass fraction to sim
+            "top_k": top_k,          # Legacy fallback
             "atr_min": atr_min,
             "rv_min": rv_min,
             "rv_max": rv_max,
         })
 
-        met, diag = backtest_from_predictions_v71(pred_val, cfg, thresholds)
+        # [CONSISTENCY FIX] Force DatetimeIndex for TopK
+        # Explicitly ensure global pred_val has datetime index before passing (or ensure func handles it)
+        # Here we rely on backtest_from_predictions_v71 doing `_ensure_datetime_index` internally,
+        # BUT `pred_val` usually comes from a split. We must ensure `ds` makes it into the index for TopK.
+        if "ds" in pred_val.columns and not isinstance(pred_val.index, pd.DatetimeIndex):
+             # Ensure time sorted for simulation
+             pred_val_sorted = pred_val.sort_values("ds")
+             pred_val_sorted.index = pd.to_datetime(pred_val_sorted["ds"], utc=True)
+             met, diag = backtest_from_predictions_v71(pred_val_sorted, cfg, thresholds)
+        else:
+             met, diag = backtest_from_predictions_v71(pred_val, cfg, thresholds)
 
         # --- PATCH: robust scoring fallback ---
         trades_df = diag.get("trades_df")
         trades_df = _ensure_pnl(trades_df)
         pnl = pd.to_numeric(trades_df["pnl"], errors="coerce").fillna(0.0).to_numpy()
+
+        # [CONSISTENCY FIX] Ensure equity starts at 1.0 to allow valid % MDD and PF calc
+        equity_curve = 1.0 + np.cumsum(pnl)
 
         gross_profit = pnl[pnl > 0].sum()
         gross_loss = (-pnl[pnl < 0]).sum()
@@ -488,8 +509,8 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, **kwargs):
         # pf_raw = (gross_profit / max(gross_loss, eps)) if gross_loss > eps else float("nan")
         net = float(pnl.sum())
 
-        # equity curve para MDD (si tu MDD hoy sale 0 por no tener equity):
-        equity_curve = np.cumsum(pnl)
+        # equity curve para MDD usa la versión Unit-Based calculada arriba
+        # equity_curve = np.cumsum(pnl) <--- CAUSANTE DEL BUG MDD > 1.0
         # --------------------------------------
 
         ntr = int(_pick(met, ["ntr_x2", "n_trades_x2", "n_trades"], 0))
@@ -497,10 +518,31 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, **kwargs):
         # equity_curve = diag.get("equity", [1.0])
 
         obj_score, pf, mdd, equity_final = compute_objective(pnl, equity_curve, ntr, cfg)
+        
+        # [PATCH B] Save artifacts per trial to avoid re-simulating
+        if fold_dir is not None:
+             trial_dir = fold_dir / "trials" / f"trial_{trial.number:04d}"
+             trial_dir.mkdir(parents=True, exist_ok=True)
+             
+             # Save trades with ID
+             if trades_df is not None:
+                 tr_out = add_trade_id(trades_df)
+                 tr_out.to_csv(trial_dir / "trades.csv", index=False)
+                 
+             # Save equity
+             pd.DataFrame({"equity": equity_curve}).to_csv(trial_dir / "equity.csv", index=False)
+             
+             # Save metrics including obj_score and validity
+             met_out = dict(met)
+             met_out["objective"] = obj_score
+             met_out["pf"] = pf.pf_capped
+             met_out["mdd"] = mdd
+             met_out["equity_final"] = equity_final
+             met_out["valid_min_trades"] = bool(ntr >= int(cfg.get("tuner", {}).get("min_trades", 200)))
+             (trial_dir / "metrics.json").write_text(json.dumps(met_out, indent=2))
 
         print(f"[tuner] pf_raw={pf.pf_raw:.3f} pf_capped={pf.pf_capped:.3f} mdd={mdd:.3f} ntr={ntr} net={equity_final-1:.3f} obj={obj_score:.3f}")
         return float(obj_score)
-
     return obj
 
 
@@ -573,12 +615,16 @@ def recompute_walkforward_summary_from_artifacts(summary_csv: str, reports_dir: 
     rep = Path(reports_dir)
 
     rows = []
+    def normalize_fold_val(x):
+        try:
+            return int(float(x))
+        except:
+            return x
+
     for fold in s["fold"].tolist():
         # FIX: Robust fold casting and path construction (fold_0.0 fix)
-        try:
-            fold_id = int(round(float(fold)))
-        except ValueError:
-            fold_id = str(fold) # fallback
+        # Apply Patch D logic locally
+        fold_id = normalize_fold_val(fold)
 
         fdir = rep / f"fold_{fold_id}"
         
@@ -738,6 +784,11 @@ def main() -> None:
     cfg.setdefault("data", {})
     cfg.setdefault("dataset", {})
     cfg.setdefault("tuning", {})
+    
+    # [PATCH] ENFORCE COSTS GLOBALLY
+    # Avoid zero-cost "holy grails" by enforcing safety switch
+    if "sim" not in cfg: cfg["sim"] = {}
+    cfg["sim"]["force_costs"] = True
 
     # --- FAIL-FAST: Validate Config ---
     # Revisión temprana de requisitos mínimos para no corretear y fallar horas después
@@ -1004,7 +1055,8 @@ def main() -> None:
         }
 
         # Tuning
-        obj = objective_factory(cfg, pred_val, fixed_thresholds=fixed_thresholds)
+        # Tuning
+        obj = objective_factory(cfg, pred_val, fold_dir=fold_dir, fixed_thresholds=fixed_thresholds)
         study = optuna.create_study(direction="maximize")
         study.optimize(obj, n_trials=int(cfg["tuning"]["n_trials"]))
         best_thresholds = study.best_params
@@ -1013,21 +1065,41 @@ def main() -> None:
         full_thresholds = {**fixed_thresholds, **best_thresholds}
 
         # --- PARCHE 4: Auditoría anti-inflado (guardar best valida) ---
-        print(f"[AUDIT] Re-running best params on VAL fold {fold['fold_id']} for artifacts...")
-        met_val, diag_val = backtest_from_predictions_v71(pred_val, cfg, full_thresholds)
+        # --- PARCHE 4 UPDATE: Copy Best Artifacts (Patch B) ---
+        print(f"[AUDIT] Copying best artifacts from trial for fold {fold['fold_id']}...")
         
-        fold_dir = out_dir / "reports" / f"fold_{fold['fold_id']}"
-        _ensure_dir(fold_dir)
+        best_n = study.best_trial.number
+        src_trial_dir = fold_dir / "trials" / f"trial_{best_n:04d}"
         
-        # Guardar artifacts de la mejor pasada de validación
-        if "trades_df" in diag_val:
-            diag_val["trades_df"].to_csv(fold_dir / "best_trades.csv", index=False)
-        
-        if "equity" in diag_val:
-            pd.DataFrame({"equity": diag_val["equity"]}).to_csv(fold_dir / "best_equity.csv", index=False)
-            
-        with open(fold_dir / "best_metrics.json", "w") as f:
-            json.dump(met_val, f, indent=2)
+        if not src_trial_dir.exists():
+            print(f"[ERROR] Best trial dir missing: {src_trial_dir}. Falling back to re-sim (not ideal).")
+            # Fallback legacy behavior just in case
+            met_val, diag_val = backtest_from_predictions_v71(pred_val, cfg, full_thresholds)
+            if "trades_df" in diag_val:
+                add_trade_id(diag_val["trades_df"]).to_csv(fold_dir / "best_trades.csv", index=False)
+            if "equity" in diag_val:
+                pd.DataFrame({"equity": diag_val["equity"]}).to_csv(fold_dir / "best_equity.csv", index=False)
+            with open(fold_dir / "best_metrics.json", "w") as f:
+                json.dump(met_val, f, indent=2)
+        else:
+            # COPY artifacts
+            # Ignore errors if optional artifacts missing, but trades/metrics mandatory
+            if (src_trial_dir / "trades.csv").exists():
+                shutil.copy2(src_trial_dir / "trades.csv", fold_dir / "best_trades.csv")
+            if (src_trial_dir / "equity.csv").exists():
+                shutil.copy2(src_trial_dir / "equity.csv", fold_dir / "best_equity.csv")
+            if (src_trial_dir / "metrics.json").exists():
+                shutil.copy2(src_trial_dir / "metrics.json", fold_dir / "best_metrics.json")
+                
+            # [PATCH C CHECKS]
+            try:
+                bm = json.loads((src_trial_dir / "metrics.json").read_text())
+                if not bm.get("valid_min_trades", False):
+                    msg = f"Best trial {best_n} n_trades={bm.get('n_trades')} < MIN_TRADES"
+                    print(f"[WARN] {msg}")
+                    (fold_dir / "BEST_INVALID_MIN_TRADES.txt").write_text(msg + "\n")
+            except Exception as e:
+                print(f"[WARN] check metrics failed: {e}")
         # -------------------------------------------------------------
 
         # Predict TEST
