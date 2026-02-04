@@ -421,7 +421,7 @@ def _pick(met: dict, keys: List[str], default=0.0):
     return default
 
 
-def objective_factory(cfg: dict, pred_val: pd.DataFrame):
+def objective_factory(cfg: dict, pred_val: pd.DataFrame, **kwargs):
     # Ajusta esta línea a como lo tengas actualmente:
     obj_cfg = cfg.get("objective", cfg.get("tuning", {}).get("objective", {}))
 
@@ -462,25 +462,17 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame):
         rv_min = trial.suggest_float("rv_min", 1e-6, 2e-4, log=True)
         rv_max = trial.suggest_float("rv_max", 6e-4, 3e-3, log=True)
 
-        thresholds = {
+        thresholds = dict(kwargs.get("fixed_thresholds", {}))
+        thresholds.update({
             "p_side_min": p_side_min,
             "score_q": score_q,
             "q_width_max": q_width_max,
             "ev_abs_min": ev_buffer,
             "top_k": top_k,
-            "use_topk": True,
-            "thr_lookback_bars": 4000,
-            "ood_q": 0.90,
-            "ev_q": 0.70,
-            "p_tp_min": 0.20,
-            "p_sl_max": 0.45,
-            "ev_buffer_mult": 1.0,
-            "q_width_mult": 2.5,
-            "cooldown_bars": 1,
             "atr_min": atr_min,
             "rv_min": rv_min,
             "rv_max": rv_max,
-        }
+        })
 
         met, diag = backtest_from_predictions_v71(pred_val, cfg, thresholds)
 
@@ -582,26 +574,32 @@ def recompute_walkforward_summary_from_artifacts(summary_csv: str, reports_dir: 
 
     rows = []
     for fold in s["fold"].tolist():
-        fdir = rep / f"fold_{int(fold)}"
-        tr_path = fdir / "trades.csv"
-        # Fallback to best_trades if trades.csv currently missing (depends on how tuning saves it)
-        # But 'trades.csv' should be the one from the chosen trial.
-        # Check if 'trades.csv' exists, if not maybe 'best_trades.csv' IS the one.
-        if not tr_path.exists():
-             if (fdir / "best_trades.csv").exists():
-                 tr_path = fdir / "best_trades.csv"
-             else:
-                 print(f"[WARN] Falta {tr_path} y best_trades.csv")
-                 continue
+        # FIX: Robust fold casting and path construction (fold_0.0 fix)
+        try:
+            fold_id = int(round(float(fold)))
+        except ValueError:
+            fold_id = str(fold) # fallback
 
-        tr = pd.read_csv(tr_path)
+        fdir = rep / f"fold_{fold_id}"
+        
+        # FIX: Prioritize best_trades.csv (User requirement: Unified metric source)
+        best_tr_path = fdir / "best_trades.csv"
+        tr_path = fdir / "trades.csv"
+        
+        target_path = best_tr_path if best_tr_path.exists() else tr_path
+        
+        if not target_path.exists():
+             print(f"[WARN] Falta trades en {fdir} (buscado: best_trades.csv o trades.csv)")
+             continue
+
+        tr = pd.read_csv(target_path)
         pnl_col = "pnl_net" if "pnl_net" in tr.columns else ("pnl" if "pnl" in tr.columns else None)
         if pnl_col is None:
             # Try ret_net
             pnl_col = "ret_net" if "ret_net" in tr.columns else None
             
         if pnl_col is None:
-            print(f"[SKIP] {tr_path} no tiene pnl/pnl_net/ret_net")
+            print(f"[SKIP] {target_path} no tiene pnl/pnl_net/ret_net")
             continue
 
         pnl = tr[pnl_col].astype(float).to_numpy()
@@ -992,15 +990,31 @@ def main() -> None:
         else:
             print("[CAL] event: y_event no existe; se omite calibración (T=1.0).")
 
+        # Fixed params structure to ensure consistency
+        fixed_thresholds = {
+            "use_topk": True,
+            "thr_lookback_bars": 4000,
+            "ood_q": 0.90,
+            "ev_q": 0.70,
+            "p_tp_min": 0.20,
+            "p_sl_max": 0.45,
+            "ev_buffer_mult": 1.0,
+            "q_width_mult": 2.5,
+            "cooldown_bars": 1,
+        }
+
         # Tuning
-        obj = objective_factory(cfg, pred_val)
+        obj = objective_factory(cfg, pred_val, fixed_thresholds=fixed_thresholds)
         study = optuna.create_study(direction="maximize")
         study.optimize(obj, n_trials=int(cfg["tuning"]["n_trials"]))
         best_thresholds = study.best_params
+        
+        # Merge fixed params so validation run is identical to tuner run
+        full_thresholds = {**fixed_thresholds, **best_thresholds}
 
         # --- PARCHE 4: Auditoría anti-inflado (guardar best valida) ---
         print(f"[AUDIT] Re-running best params on VAL fold {fold['fold_id']} for artifacts...")
-        met_val, diag_val = backtest_from_predictions_v71(pred_val, cfg, best_thresholds)
+        met_val, diag_val = backtest_from_predictions_v71(pred_val, cfg, full_thresholds)
         
         fold_dir = out_dir / "reports" / f"fold_{fold['fold_id']}"
         _ensure_dir(fold_dir)
@@ -1034,7 +1048,7 @@ def main() -> None:
                 pred_test[["p_evt_none", "p_evt_breakout", "p_evt_rebound", "p_evt_spike"]].values, T_evt
             ))
 
-        met, diag = backtest_from_predictions_v71(pred_test, cfg, best_thresholds)
+        met, diag = backtest_from_predictions_v71(pred_test, cfg, full_thresholds)
 
         fold_dir = out_dir / "reports" / f"fold_{fold['fold_id']}"
         _ensure_dir(fold_dir)

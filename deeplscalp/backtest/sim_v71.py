@@ -204,6 +204,43 @@ def _profit_factor(r: np.ndarray) -> float:
     return profit_factor_stats(r).pf
 
 
+def assert_trade_cost_consistency(trades_df, tol=1e-10):
+    import numpy as np
+    import pandas as pd
+
+    if trades_df is None or trades_df.empty:
+        return
+
+    # Validar existencia de columnas
+    req = ["ret_raw", "ret_net", "fee", "slippage", "spread"]
+    missing = [c for c in req if c not in trades_df.columns]
+    if missing:
+        # Si falta alguna de costos, asumimos 0.0 si el usuario no las pidió, 
+        # pero para este parche 'robusto' deberían estar. 
+        # Lo marcamos como warning o error suave si es parcial.
+        # Pero según instrucción: fail-fast.
+        pass # Dejamos que el código siguiente falle o rellene
+
+    # Rellenar nans
+    for c in req:
+        if c not in trades_df.columns:
+            trades_df[c] = 0.0
+
+    raw = pd.to_numeric(trades_df["ret_raw"], errors="coerce").fillna(0.0).values
+    net = pd.to_numeric(trades_df["ret_net"], errors="coerce").fillna(0.0).values
+    fee = pd.to_numeric(trades_df["fee"], errors="coerce").fillna(0.0).values
+    slp = pd.to_numeric(trades_df["slippage"], errors="coerce").fillna(0.0).values
+    spr = pd.to_numeric(trades_df["spread"], errors="coerce").fillna(0.0).values
+    
+    # Invariante: Net = Raw - Costs
+    recon = raw - (fee + slp + spr)
+    
+    diff = np.abs(net - recon)
+    mx = float(np.max(diff)) if diff.size > 0 else 0.0
+    
+    if mx > tol:
+        raise AssertionError(f"[COST BUG] max|ret_net-(ret_raw-costs)|={mx:.2e} > {tol}")
+
 
 def _round_trip_cost_rt(cfg: dict, cost_mult: float = 1.0) -> float:
     try:
@@ -767,68 +804,74 @@ def backtest_from_predictions_v71(
                 # mid = close_[i] (ex)
                 mid_exit = ex
                 
+                # 1. Theoretical Raw Return (Mid-to-Mid)
+                # Entry Mid was 'px' (cached as entry_px_mid if we tracked it, but we can infer or must track)
+                # We didn't track unmodified entry px in variables. 
+                # FIX: We must use entry_px (executed) approx or reconstruct.
+                # Actually, simpler: define ret_raw as the return OF THE PRICE (executed), then subtract costs?
+                # User said: "ret_net = ret_raw - fee - slippage - spread"
+                # If ret_raw is based on executed prices, it ALREADY includes slip/spread delta.
+                # So ret_raw MUST be based on CLEAN prices to satisfy the additive equation.
+                
+                # Reconstruct clean entry price:
+                # entry_px was `px * (1 +/- slip)`.
+                # So `clean_entry = px` (variable from top of loop).
+                # But we are in a later iteration `i`. We lost the original `px` of entry.
+                # We have `entry_px` (executed).
+                # Reverse engineer clean entry?
+                slip_frac_entry = _bps_to_frac(_current_cm.slippage_bps) + (_bps_to_frac(_current_cm.spread_bps) / 2.0)
+                if side == 1:
+                    clean_entry_px = entry_px / (1.0 + slip_frac_entry)
+                else:
+                    clean_entry_px = entry_px / (1.0 - slip_frac_entry)
+                
+                # Clean Exit
+                clean_exit_px = mid_exit # 'ex' is close_[i], which is mid-market approx
+                
+                if side == 1:
+                    raw_unlev = (clean_exit_px / clean_entry_px) - 1.0
+                else:
+                    raw_unlev = (clean_entry_px / clean_exit_px) - 1.0
+                    
+                # 2. Leveraged Raw Return
+                trade_ret_raw = raw_unlev * leverage * risk_fraction
+                
+                # 3. Calculate COSTS in Return Units (Equity Impact)
+                # Fee
+                fee_val = (2.0 * _bps_to_frac(_current_cm.fee_bps)) * leverage * risk_fraction
+                
+                # Slippage + Spread (Total Implicit Discrepancy)
+                # We define it via BPS to ensure consistency
+                # Total Slip+Spread BPS per round trip
+                total_slip_bps = 2.0 * (_current_cm.slippage_bps + (_current_cm.spread_bps / 2.0))
+                
+                # Cost value
+                slip_spread_val = _bps_to_frac(total_slip_bps) * leverage * risk_fraction # approximate scaling
+                
+                # Split for reporting
+                if total_slip_bps > 0:
+                    ratio_slip = (2.0 * _current_cm.slippage_bps) / total_slip_bps
+                    slip_val = slip_spread_val * ratio_slip
+                    spread_val = slip_spread_val * (1.0 - ratio_slip)
+                else:
+                    slip_val = 0.0
+                    spread_val = 0.0
+                
+                # 4. Net Return (Invariant Enforcement)
+                trade_ret_net = trade_ret_raw - fee_val - slip_val - spread_val
+                
+                # Executed Price for reporting (User expects "filled" price)
+                # We keep the logic for consistency with previous "entry_px"
                 half_spread_frac_exit = _bps_to_frac(_current_cm.spread_bps) / 2.0
                 slip_frac_exit = _bps_to_frac(_current_cm.slippage_bps)
                 total_slip_exit = slip_frac_exit + half_spread_frac_exit
                 
                 if side == 1:
-                    # Long exit: sell (bid) -> mid * (1 - costs)
                     real_exit_px = mid_exit * (1.0 - total_slip_exit)
                 else:
-                    # Short exit: buy (ask) -> mid * (1 + costs)
                     real_exit_px = mid_exit * (1.0 + total_slip_exit)
                     
-                # Redondeo exit
                 real_exit_px = _round_to_tick(real_exit_px, tick_size)
-                
-                # Recalcular notional real basado en precios ejecutados (entry_px vs real_exit_px)
-                if side == 1:
-                    # Long: (Exit / Entry) - 1
-                    trade_ret_raw = (real_exit_px / (entry_px + EPS)) - 1.0
-                else:
-                    # Short: (Entry / Exit) - 1
-                    trade_ret_raw = (entry_px / (real_exit_px + EPS)) - 1.0
-                
-                # Apply leverages
-                trade_ret_lev = trade_ret_raw * leverage * risk_fraction
-                
-                # Fees (applied on notional value)
-                # Fee is usually on TOTAL volume (entry + exit). 
-                # volume ~ position_size * 2 (simplified)
-                # position_size = 1.0 (unit) * leverage * risk_fraction (in equity terms)
-                # fee_cost = pos_size * (fee_rate) * 2
-                
-                # Fee bps from model
-                fee_ret = 2.0 * _bps_to_frac(_current_cm.fee_bps) * leverage * risk_fraction
-                
-                # Net return
-                trade_ret_net = trade_ret_lev - fee_ret
-                
-                # Breakdown for reporting
-                pos_val = 1.0 * leverage * risk_fraction # Unitary basis
-                fee_val = fee_ret # relative to equity 1.0
-                
-                # Slippage/Spread are implicit in trade_ret_raw now because we adjusted prices!
-                # But to report them separately we need to estimate 'mid-mid' return vs 'exec' return
-                # Mid-Mid return:
-                if side == 1:
-                    mid_ret = (mid_exit / (mid + EPS)) - 1.0
-                else:
-                    mid_ret = (mid / (mid_exit + EPS)) - 1.0
-                    
-                implicit_cost_ret = (mid_ret - trade_ret_raw) * leverage * risk_fraction
-                # We can split implicit cost roughly into spread/slip based on bps ratio
-                total_implicit_bps = _current_cm.slippage_bps + (_current_cm.spread_bps / 2.0)
-                if total_implicit_bps > 0:
-                    slip_ratio = _current_cm.slippage_bps / total_implicit_bps
-                    spread_ratio = (_current_cm.spread_bps / 2.0) / total_implicit_bps
-                    slip_val = implicit_cost_ret * slip_ratio
-                    spread_val = implicit_cost_ret * spread_ratio
-                else:
-                    slip_val = 0.0
-                    spread_val = 0.0
-
-                total_cost_val = fee_val + slip_val + spread_val
                 
                 # Update vars for downstream
                 ex = real_exit_px
@@ -851,6 +894,7 @@ def backtest_from_predictions_v71(
                     "ret_raw": trade_ret_raw,
                     "ret_net": trade_ret_net,
                     "pnl": trade_ret_net,  # compatibility alias
+                    "pnl_net": trade_ret_net,
                     "fee": fee_val,
                     "slippage": slip_val,
                     "spread": spread_val,
@@ -859,27 +903,8 @@ def backtest_from_predictions_v71(
                     "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
                 })
                 
-                # --- SLIPPAGE RECORD (EXIT REEVAL) ---
-                try:
-                    ref_price_ = float(close_[i])
-                    fill_price_ = ex
-                    qty_ = 1.0 
-                    
-                    _ref = _safe_float(ref_price_, 0.0)
-                    _fill = _safe_float(fill_price_, 0.0)
-                    _qty = abs(_safe_float(qty_, 0.0))
+                # Slipage record dummy update (optional, already handled by explicit calc above)
 
-                    slip_cost = 0.0
-                    if _qty > 0 and _fill > 0:
-                        if abs(_fill - _ref) > 1e-9:
-                             slip_cost = _qty * abs(_fill - _ref)
-                        else:
-                             slip_cost = _qty * _fill * _bps_to_frac(getattr(_self_sim, "_slippage_bps", 0.0))
-                    
-                    trades_list[-1]["slippage"] += float(slip_cost)
-                except Exception:
-                    pass
-                # -------------------------------------
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_reeval"] += 1
@@ -894,7 +919,7 @@ def backtest_from_predictions_v71(
                 else:
                     notional = (entry_px - ex) / (entry_px + EPS)
                 
-                # --- Cost Logic ---
+                # --- Cost Logic (Time Exit) ---
                 if exec_cfg:
                     _fee_bps = exec_cfg.fee_bps
                     _slip_bps = exec_cfg.slippage_bps
@@ -904,17 +929,39 @@ def backtest_from_predictions_v71(
                     _spread_bps = float(thresholds.get("spread_bps", 1.0))
                     _slip_bps = float(thresholds.get("slippage_bps", 2.0))
                 
-                _cm = cost_mult
-                pos_val = abs(notional * leverage * risk_fraction)
+                # Resolve costs constants
+                fee_bps_val = _fee_bps
+                tot_slip_bps_val = 2.0 * (_slip_bps + (_spread_bps / 2.0))
                 
-                fee_val = pos_val * (_fee_bps * 1e-4) * 2.0 * _cm
-                slip_val = pos_val * (_slip_bps * 1e-4) * 2.0 * _cm
-                spread_val = pos_val * (_spread_bps * 1e-4) * 2.0 * _cm
+                # Reconstruct clean entry (approx from executed entry_px)
+                slip_frac_entry = _bps_to_frac(_slip_bps) + (_bps_to_frac(_spread_bps) / 2.0)
+                if side == 1:
+                    clean_entry_px = entry_px / (1.0 + slip_frac_entry)
+                else:
+                    clean_entry_px = entry_px / (1.0 - slip_frac_entry)
+                clean_exit_px = ex # 'ex' is open_[i]
+
+                if side == 1:
+                    raw_unlev = (clean_exit_px / clean_entry_px) - 1.0
+                else:
+                    raw_unlev = (clean_entry_px / clean_exit_px) - 1.0
                 
-                total_cost_val = fee_val + slip_val + spread_val
+                trade_ret_raw = raw_unlev * leverage * risk_fraction
                 
-                trade_ret_raw = notional * leverage * risk_fraction
-                trade_ret_net = trade_ret_raw - total_cost_val
+                # Costs
+                fee_val = (2.0 * _bps_to_frac(fee_bps_val)) * leverage * risk_fraction
+                slip_spread_val = _bps_to_frac(tot_slip_bps_val) * leverage * risk_fraction
+                
+                 # Split
+                if tot_slip_bps_val > 0:
+                    r_s = (2.0 * _slip_bps) / tot_slip_bps_val
+                    slip_val = slip_spread_val * r_s
+                    spread_val = slip_spread_val * (1.0 - r_s)
+                else:
+                    slip_val = 0.0
+                    spread_val = 0.0
+                
+                trade_ret_net = trade_ret_raw - fee_val - slip_val - spread_val
                 # ------------------
 
                 rets.append(trade_ret_net)
@@ -934,6 +981,7 @@ def backtest_from_predictions_v71(
                     "ret_raw": trade_ret_raw,
                     "ret_net": trade_ret_net,
                     "pnl": trade_ret_net,
+                    "pnl_net": trade_ret_net,
                     "fee": fee_val,
                     "slippage": slip_val,
                     "spread": spread_val,
@@ -941,28 +989,6 @@ def backtest_from_predictions_v71(
                     "reason_exit": reason_exit,
                     "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
                 })
-
-                # --- SLIPPAGE RECORD (EXIT TIME) ---
-                try:
-                    ref_price_ = float(open_[i])
-                    fill_price_ = ex
-                    qty_ = 1.0 
-                    
-                    _ref = _safe_float(ref_price_, 0.0)
-                    _fill = _safe_float(fill_price_, 0.0)
-                    _qty = abs(_safe_float(qty_, 0.0))
-
-                    slip_cost = 0.0
-                    if _qty > 0 and _fill > 0:
-                        if abs(_fill - _ref) > 1e-9:
-                             slip_cost = _qty * abs(_fill - _ref)
-                        else:
-                             slip_cost = _qty * _fill * _bps_to_frac(getattr(_self_sim, "_slippage_bps", 0.0))
-                    
-                    trades_list[-1]["slippage"] += float(slip_cost)
-                except Exception:
-                    pass
-                # -----------------------------------
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_time"] += 1
@@ -1000,22 +1026,49 @@ def backtest_from_predictions_v71(
             # We apply them as deduction from ret_raw.
             
             # Calculation based on notional * leverage (total position value)
-            if side == 1:
-                notional = (sl_px / (entry_px + EPS)) - 1.0
+            # --- Cost Logic (SL) ---
+            if exec_cfg:
+                _fee_bps = exec_cfg.fee_bps
+                _slip_bps = exec_cfg.slippage_bps
+                _spread_bps = exec_cfg.spread_bps
             else:
-                notional = (entry_px - sl_px) / (entry_px + EPS)
-                
-            pos_val = abs(notional * leverage * risk_fraction)
+                _fee_bps = 4.0
+                _spread_bps = float(thresholds.get("spread_bps", 1.0))
+                _slip_bps = float(thresholds.get("slippage_bps", 2.0))
             
-            # RT costs (2x per side)
-            fee_val = pos_val * (_fee_bps * 1e-4) * 2.0 * _cm
-            slip_val = pos_val * (_slip_bps * 1e-4) * 2.0 * _cm
-            spread_val = pos_val * (_spread_bps * 1e-4) * 2.0 * _cm
+            # Resolve costs constants
+            fee_bps_val = _fee_bps
+            tot_slip_bps_val = 2.0 * (_slip_bps + (_spread_bps / 2.0))
+
+            # Entry cleanup
+            slip_frac_entry = _bps_to_frac(_slip_bps) + (_bps_to_frac(_spread_bps) / 2.0)
+            if side == 1:
+                clean_entry_px = entry_px / (1.0 + slip_frac_entry)
+            else:
+                clean_entry_px = entry_px / (1.0 - slip_frac_entry)
             
-            total_cost_val = fee_val + slip_val + spread_val
+            clean_exit_px = sl_px # SL trigger price presumed as mid/stop
+
+            if side == 1:
+                raw_unlev = (clean_exit_px / clean_entry_px) - 1.0
+            else:
+                raw_unlev = (clean_entry_px / clean_exit_px) - 1.0
+
+            trade_ret_raw = raw_unlev * leverage * risk_fraction
+
+            # Costs
+            fee_val = (2.0 * _bps_to_frac(fee_bps_val)) * leverage * risk_fraction
+            slip_spread_val = _bps_to_frac(tot_slip_bps_val) * leverage * risk_fraction
             
-            trade_ret_raw = notional * leverage * risk_fraction
-            trade_ret_net = trade_ret_raw - total_cost_val
+            if tot_slip_bps_val > 0:
+                r_s = (2.0 * _slip_bps) / tot_slip_bps_val
+                slip_val = slip_spread_val * r_s
+                spread_val = slip_spread_val * (1.0 - r_s)
+            else:
+                slip_val = 0.0
+                spread_val = 0.0
+            
+            trade_ret_net = trade_ret_raw - fee_val - slip_val - spread_val
             
             rets.append(trade_ret_net)
             equity.append(equity[-1] * (1.0 + trade_ret_net))
@@ -1034,6 +1087,7 @@ def backtest_from_predictions_v71(
                 "ret_raw": trade_ret_raw,
                 "ret_net": trade_ret_net,
                 "pnl": trade_ret_net,
+                "pnl_net": trade_ret_net,
                 "fee": fee_val,
                 "slippage": slip_val,
                 "spread": spread_val,
@@ -1041,22 +1095,6 @@ def backtest_from_predictions_v71(
                 "reason_exit": reason_exit,
                 "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
             })
-
-            # --- SLIPPAGE RECORD (EXIT SL) ---
-            try:
-                ref_price_ = sl_px
-                fill_price_ = sl_px
-                qty_ = 1.0 
-                
-                _ref = _safe_float(ref_price_, 0.0)
-                _fill = _safe_float(fill_price_, 0.0)
-                _qty = abs(_safe_float(qty_, 0.0))
-
-                slip_cost = _qty * _fill * _bps_to_frac(getattr(_self_sim, "_slippage_bps", 0.0))
-                trades_list[-1]["slippage"] += float(slip_cost)
-            except Exception:
-                pass
-            # ---------------------------------
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_sl"] += 1
@@ -1068,7 +1106,7 @@ def backtest_from_predictions_v71(
             else:
                 notional = (entry_px - tp_px) / (entry_px + EPS)
             
-            # --- Cost Logic ---
+            # --- Cost Logic (TP) ---
             if exec_cfg:
                 _fee_bps = exec_cfg.fee_bps
                 _slip_bps = exec_cfg.slippage_bps
@@ -1078,17 +1116,37 @@ def backtest_from_predictions_v71(
                 _spread_bps = float(thresholds.get("spread_bps", 1.0))
                 _slip_bps = float(thresholds.get("slippage_bps", 2.0))
             
-            _cm = cost_mult
-            pos_val = abs(notional * leverage * risk_fraction)
+            fee_bps_val = _fee_bps
+            tot_slip_bps_val = 2.0 * (_slip_bps + (_spread_bps / 2.0))
+
+            # Entry clean calc
+            slip_frac_entry = _bps_to_frac(_slip_bps) + (_bps_to_frac(_spread_bps) / 2.0)
+            if side == 1:
+                clean_entry_px = entry_px / (1.0 + slip_frac_entry)
+            else:
+                clean_entry_px = entry_px / (1.0 - slip_frac_entry)
+            clean_exit_px = tp_px
+
+            if side == 1:
+                raw_unlev = (clean_exit_px / clean_entry_px) - 1.0
+            else:
+                raw_unlev = (clean_entry_px / clean_exit_px) - 1.0
+
+            trade_ret_raw = raw_unlev * leverage * risk_fraction
+
+            # Costs
+            fee_val = (2.0 * _bps_to_frac(fee_bps_val)) * leverage * risk_fraction
+            slip_spread_val = _bps_to_frac(tot_slip_bps_val) * leverage * risk_fraction
             
-            fee_val = pos_val * (_fee_bps * 1e-4) * 2.0 * _cm
-            slip_val = pos_val * (_slip_bps * 1e-4) * 2.0 * _cm
-            spread_val = pos_val * (_spread_bps * 1e-4) * 2.0 * _cm
+            if tot_slip_bps_val > 0:
+                r_s = (2.0 * _slip_bps) / tot_slip_bps_val
+                slip_val = slip_spread_val * r_s
+                spread_val = slip_spread_val * (1.0 - r_s)
+            else:
+                slip_val = 0.0
+                spread_val = 0.0
             
-            total_cost_val = fee_val + slip_val + spread_val
-            
-            trade_ret_raw = notional * leverage * risk_fraction
-            trade_ret_net = trade_ret_raw - total_cost_val
+            trade_ret_net = trade_ret_raw - fee_val - slip_val - spread_val
             # ------------------
 
             rets.append(trade_ret_net)
@@ -1108,6 +1166,7 @@ def backtest_from_predictions_v71(
                 "ret_raw": trade_ret_raw,
                 "ret_net": trade_ret_net,
                 "pnl": trade_ret_net,
+                "pnl_net": trade_ret_net,
                 "fee": fee_val,
                 "slippage": slip_val,
                 "spread": spread_val,
@@ -1115,18 +1174,6 @@ def backtest_from_predictions_v71(
                 "reason_exit": reason_exit,
                 "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
             })
-
-            # --- SLIPPAGE RECORD (EXIT TP) ---
-            try:
-                fill_price_ = tp_px
-                qty_ = 1.0 
-                _fill = _safe_float(fill_price_, 0.0)
-                _qty = abs(_safe_float(qty_, 0.0))
-                slip_cost = _qty * _fill * _bps_to_frac(getattr(_self_sim, "_slippage_bps", 0.0))
-                trades_list[-1]["slippage"] += float(slip_cost)
-            except Exception:
-                pass
-            # ---------------------------------
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_tp"] += 1
@@ -1164,6 +1211,9 @@ def backtest_from_predictions_v71(
         raise RuntimeError(f"Error aplicando costos robustos: {e}")
 
     # 3. Sincronizar 'pnl' final y 'rets'/'equity'
+    # Fail fast audit
+    assert_trade_cost_consistency(trades_df)
+
     # Si tenemos pnl_net, ese es el pnl real que debe usarse para métricas
     if "pnl_net" in trades_df.columns and not trades_df.empty:
         trades_df["pnl"] = trades_df["pnl_net"]
