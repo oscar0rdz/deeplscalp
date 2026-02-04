@@ -636,37 +636,57 @@ def backtest_from_predictions_v71(
                 dbg["skip_atr"] += 1
                 continue
 
-            # Aplicar spread y slippage (PARCHE 2: Costos Reales)
-            mid = px
-            spread_bps = float(thresholds.get("spread_bps", 5.0))
-            slippage_bps = float(thresholds.get("slippage_bps", 2.0))
+            # Aplicar spread y slippage (PARCHE 2: Costos Reales con CostModel)
+            from deeplscalp.sim.cost_model import CostModel
             
-            # Unificar spread/2 dentro de 'slip' para asegurar impacto
+            # Resolver configuración de costos
+            # Prioridad: exec_cfg pasados a la función > cfg.sim > defaults
+            if exec_cfg:
+                 cm = CostModel(
+                     fee_bps=float(exec_cfg.fee_bps),
+                     slippage_bps=float(exec_cfg.slippage_bps),
+                     spread_bps=float(exec_cfg.spread_bps),
+                     latency_bars=int(exec_cfg.exec_lag_bars)
+                 )
+            else:
+                 sim_conf = (cfg.get("sim", {}) or {}) if isinstance(cfg, dict) else {}
+                 cm = CostModel(
+                     fee_bps=float(sim_conf.get("fee_bps", 4.0)),
+                     slippage_bps=float(sim_conf.get("slippage_bps", 2.0)),
+                     spread_bps=float(sim_conf.get("spread_bps", 1.0)),
+                     latency_bars=int(sim_conf.get("latency_bars", 1))
+                 )
+
+            # Costos en unidades de retorno (approx) para sizing y thresholds
+            # Nota: para ejecución exacta usamos precios, pero para estimaciones usamos los bps
+            
+            # Costo total de fricción en precio (multplicador para entry/exit)
             # slip_total = slippage + spread/2
-            half_spread_frac = (spread_bps / 10000.0) / 2.0
-            slip_frac = (slippage_bps / 10000.0)
-            
-            # Costo total de fricción en precio (por lado)
-            total_slip = slip_frac + half_spread_frac
+            half_spread_frac = _bps_to_frac(cm.spread_bps) / 2.0
+            slip_frac = _bps_to_frac(cm.slippage_bps)
+            total_slip_frac = slip_frac + half_spread_frac
 
             if side_choice == 1:
                 # Long: Compra caro (ask), Vende barato (bid)
-                # entry = mid * (1 + slip)
-                # exit (preliminar) = mid * (1 - slip)
-                entry_px = mid * (1.0 + total_slip)
-                # El exit se recalcula al salir, pero aquí definimos la base si fuera instantáneo (no se usa realmente)
-                exit_px = mid * (1.0 - total_slip)
+                # entry = mid * (1 + slip_total)
+                if px > 0:
+                    entry_px = px * (1.0 + total_slip_frac)
+                else:
+                    entry_px = px # Should be skipped by checks above
             else:
                 # Short: Vende barato (bid), Compra caro (ask)
-                # entry = mid * (1 - slip)
-                entry_px = mid * (1.0 - total_slip)
-                exit_px = mid * (1.0 + total_slip)
+                # entry = mid * (1 - slip_total)
+                if px > 0:
+                    entry_px = px * (1.0 - total_slip_frac)
+                else:
+                    entry_px = px
 
             # Redondeo a tick_size
             tick_size = float(thresholds.get("tick_size", 0.0001))
             entry_px = _round_to_tick(entry_px, tick_size)
-            # exit_px no se usa aquí realmente para la salida, se usa para sizing si acaso.
-            # La salida real aplica su propio spread/slip al momento del exit (ver lógica abajo).
+            
+            # Definimos cost object para reevaluación
+            _current_cm = cm
 
             # Sizing y redondeo a step_size
             qty = 1.0  # placeholder
@@ -740,27 +760,78 @@ def backtest_from_predictions_v71(
                 else:
                     notional = (entry_px - ex) / (entry_px + EPS)
                 
-                # --- Cost Logic ---
-                if exec_cfg:
-                    _fee_bps = exec_cfg.fee_bps
-                    _slip_bps = exec_cfg.slippage_bps
-                    _spread_bps = exec_cfg.spread_bps
+                # --- Cost Logic with CostModel ---
+                # Usamos _current_cm definido al entrar
+                
+                # Exit Price con slippage/spread
+                # mid = close_[i] (ex)
+                mid_exit = ex
+                
+                half_spread_frac_exit = _bps_to_frac(_current_cm.spread_bps) / 2.0
+                slip_frac_exit = _bps_to_frac(_current_cm.slippage_bps)
+                total_slip_exit = slip_frac_exit + half_spread_frac_exit
+                
+                if side == 1:
+                    # Long exit: sell (bid) -> mid * (1 - costs)
+                    real_exit_px = mid_exit * (1.0 - total_slip_exit)
                 else:
-                    _fee_bps = 4.0
-                    _spread_bps = float(thresholds.get("spread_bps", 1.0))
-                    _slip_bps = float(thresholds.get("slippage_bps", 2.0))
+                    # Short exit: buy (ask) -> mid * (1 + costs)
+                    real_exit_px = mid_exit * (1.0 + total_slip_exit)
+                    
+                # Redondeo exit
+                real_exit_px = _round_to_tick(real_exit_px, tick_size)
                 
-                _cm = cost_mult
-                pos_val = abs(notional * leverage * risk_fraction)
+                # Recalcular notional real basado en precios ejecutados (entry_px vs real_exit_px)
+                if side == 1:
+                    # Long: (Exit / Entry) - 1
+                    trade_ret_raw = (real_exit_px / (entry_px + EPS)) - 1.0
+                else:
+                    # Short: (Entry / Exit) - 1
+                    trade_ret_raw = (entry_px / (real_exit_px + EPS)) - 1.0
                 
-                fee_val = pos_val * (_fee_bps * 1e-4) * 2.0 * _cm
-                slip_val = pos_val * (_slip_bps * 1e-4) * 2.0 * _cm
-                spread_val = pos_val * (_spread_bps * 1e-4) * 2.0 * _cm
+                # Apply leverages
+                trade_ret_lev = trade_ret_raw * leverage * risk_fraction
                 
+                # Fees (applied on notional value)
+                # Fee is usually on TOTAL volume (entry + exit). 
+                # volume ~ position_size * 2 (simplified)
+                # position_size = 1.0 (unit) * leverage * risk_fraction (in equity terms)
+                # fee_cost = pos_size * (fee_rate) * 2
+                
+                # Fee bps from model
+                fee_ret = 2.0 * _bps_to_frac(_current_cm.fee_bps) * leverage * risk_fraction
+                
+                # Net return
+                trade_ret_net = trade_ret_lev - fee_ret
+                
+                # Breakdown for reporting
+                pos_val = 1.0 * leverage * risk_fraction # Unitary basis
+                fee_val = fee_ret # relative to equity 1.0
+                
+                # Slippage/Spread are implicit in trade_ret_raw now because we adjusted prices!
+                # But to report them separately we need to estimate 'mid-mid' return vs 'exec' return
+                # Mid-Mid return:
+                if side == 1:
+                    mid_ret = (mid_exit / (mid + EPS)) - 1.0
+                else:
+                    mid_ret = (mid / (mid_exit + EPS)) - 1.0
+                    
+                implicit_cost_ret = (mid_ret - trade_ret_raw) * leverage * risk_fraction
+                # We can split implicit cost roughly into spread/slip based on bps ratio
+                total_implicit_bps = _current_cm.slippage_bps + (_current_cm.spread_bps / 2.0)
+                if total_implicit_bps > 0:
+                    slip_ratio = _current_cm.slippage_bps / total_implicit_bps
+                    spread_ratio = (_current_cm.spread_bps / 2.0) / total_implicit_bps
+                    slip_val = implicit_cost_ret * slip_ratio
+                    spread_val = implicit_cost_ret * spread_ratio
+                else:
+                    slip_val = 0.0
+                    spread_val = 0.0
+
                 total_cost_val = fee_val + slip_val + spread_val
                 
-                trade_ret_raw = notional * leverage * risk_fraction
-                trade_ret_net = trade_ret_raw - total_cost_val
+                # Update vars for downstream
+                ex = real_exit_px
                 # ------------------
 
                 rets.append(trade_ret_net)

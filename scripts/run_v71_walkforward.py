@@ -1066,8 +1066,18 @@ def main() -> None:
     recompute_walkforward_summary_from_artifacts(
         str(out_dir / "reports" / "walkforward_summary.csv"),
         str(out_dir / "reports"),
-        out_csv=str(out_dir / "reports" / "walkforward_summary_audited.csv"),
+        out_csv=str(out_dir / "reports" / "walkforward_summary_recalc.csv"),
     )
+
+    # === AUDIT (source-of-truth metrics) ===
+    try:
+        import subprocess, sys
+        rep_dir = str(out_dir / "reports")
+        cmd = [sys.executable, "-m", "deeplscalp.tools.audit_wf", "--reports", rep_dir, "--min-trades", "200"]
+        print("[AUDIT] running:", " ".join(cmd))
+        subprocess.run(cmd, check=True)
+    except Exception as e:
+        print("[AUDIT] FAILED:", repr(e))
 
 
 if __name__ == "__main__":
