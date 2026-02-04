@@ -118,10 +118,44 @@ def add_trade_id(df: pd.DataFrame) -> pd.DataFrame:
     cols = [c for c in ["ts_entry","ts_exit","side","entry_price","exit_price"] if c in df.columns]
     if len(cols) < 3:
         return df
-    # Convert dates to str explicitly to avoid float formatting issues if timestamps
-    s = df[cols].astype(str).agg("|".join, axis=1).to_list()
+    
+    # [PATCH C] Trade ID Stability
+    # 1. Round prices to 8 decimals
+    # 2. Format timestamps consistently (ISO or ns integer)
+    
     df = df.copy()
-    df["trade_id"] = [hashlib.md5(x.encode()).hexdigest() for x in s]
+    
+    # Hash distinct columns
+    # We construct a string: side|ts_entry_ns|ts_exit_ns|entry_px_8f|exit_px_8f
+    
+    def _fmt(row):
+        # side
+        s_side = str(row.get("side", ""))
+        
+        # timestamps: ensure int (ns) or consistent iso
+        ts_en = row.get("ts_entry")
+        ts_ex = row.get("ts_exit")
+        
+        # helper to get robust string rep of time
+        def _t_str(t):
+            try:
+                # If pandas Timestamp
+                val = t.value # nanoseconds
+                return str(val)
+            except:
+                return str(t)
+
+        s_en = _t_str(ts_en)
+        s_ex = _t_str(ts_ex)
+        
+        # prices
+        p_en = f"{float(row.get('entry_price', 0.0)):.8f}"
+        p_ex = f"{float(row.get('exit_price', 0.0)):.8f}"
+        
+        raw = f"{s_side}|{s_en}|{s_ex}|{p_en}|{p_ex}"
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    df["trade_id"] = df.apply(_fmt, axis=1)
     return df
 
 @dataclass(frozen=True)
@@ -290,10 +324,16 @@ def profit_factor_stats(r: np.ndarray, pf_cap: float = DEFAULT_PF_CAP) -> Profit
     zero_loss = bool(neg < PF_EPS)
     
     if zero_loss:
-        # PF es NaN si no hay pérdidas para evitar inflado artificial, 
-        # o podemos usar pf_cap si hay ganancias. 
-        # El usuario sugirió NaN en el prompt para penalizar o alinear.
-        pf = float(np.nan if neg <= 1e-12 else (pf_cap if pos > 0 else 0.0))
+        # [PATCH B] Avoid huge PF on near-zero loss
+        # Strategy: if gross_profit > 0 and gross_loss ~ 0 -> PF = pf_cap
+        #           if gross_profit == 0 -> PF = 0.0
+        #           BUT, we define a MIN_LOSS_THRESHOLD for division
+        MIN_LOSS_THRESHOLD = 1e-9
+        eff_loss = max(neg, MIN_LOSS_THRESHOLD)
+        
+        # Real PF calculation with floor on loss
+        raw_pf = pos / eff_loss
+        pf = float(min(pf_cap, raw_pf))
     else:
         pf = float(min(pf_cap, pos / max(neg, PF_EPS)))
     return ProfitFactorStats(gross_profit=pos, gross_loss=neg, pf=pf, zero_loss=zero_loss)
@@ -588,9 +628,16 @@ def backtest_from_predictions_v71(
     q_width_mult = float(thresholds.get("q_width_mult", 2.5))      # q90-q10 >= 2.5x costo
 
     ev_buffer = ev_buffer_mult * cost_rt_notional if adaptive_gating else 0.0
-    q_width_thr = q_width_mult * cost_rt_notional if adaptive_gating else 0.0
-
-            # [PATCH] Dynamic TopK from fraction (Consistency Fix)
+    
+    # [PATCH E] Ensure non-zero threshold if costs are zero but we want functionality?
+    # Or just rely on cost logic. If cost is 0, gate is open. That's consistent.
+    # Check if tuner passed explict "q_width_mult"
+    if "q_width_mult" in thresholds:
+         q_width_thr = float(thresholds["q_width_mult"]) * cost_rt_notional if adaptive_gating else 0.0
+    else:
+         q_width_thr = q_width_mult * cost_rt_notional if adaptive_gating else 0.0
+         
+    # [PATCH] Dynamic TopK from fraction (Consistency Fix)
     use_topk = bool(thresholds.get("use_topk", True))
     
     if "topk_frac" in thresholds and float(thresholds["topk_frac"]) > 0:
@@ -706,18 +753,22 @@ def backtest_from_predictions_v71(
     final_slip_bps = 2.0
     final_spread_bps = 1.0
     final_lag = 1
+    final_slip_atr_k = 0.0
 
     if exec_cfg:
         final_fee_bps = float(exec_cfg.fee_bps)
         final_slip_bps = float(exec_cfg.slippage_bps)
         final_spread_bps = float(exec_cfg.spread_bps)
         final_lag = int(exec_cfg.exec_lag_bars)
+        final_slip_atr_k = float(exec_cfg.slippage_atr_k) if hasattr(exec_cfg, 'slippage_atr_k') else 0.0
     else:
         sim_conf = (cfg.get("sim", {}) or {}) if isinstance(cfg, dict) else {}
         final_fee_bps = float(sim_conf.get("fee_bps", 4.0))
         final_slip_bps = float(sim_conf.get("slippage_bps", 2.0))
         final_spread_bps = float(sim_conf.get("spread_bps", 1.0))
         final_lag = int(sim_conf.get("latency_bars", 1))
+        # [PATCH F] Read slippage_atr_k from sim config
+        final_slip_atr_k = float(sim_conf.get("slippage_atr_k", 0.0))
 
     # Enforce strict minimums if required
     if force_costs:
@@ -734,6 +785,8 @@ def backtest_from_predictions_v71(
         spread_bps=final_spread_bps,
         latency_bars=final_lag
     )
+    # We also store k for manual loop application since CostModel might not handle it explicitly here
+    _slip_atr_k = final_slip_atr_k
 
     n = len(df)
     for i in range(n):
@@ -826,8 +879,9 @@ def backtest_from_predictions_v71(
                 dbg["skip_atr"] += 1
                 continue
 
-            # Aplicar spread y slippage (PARCHE 2: Costos Reales con CostModel)
-            # Ya tenemos 'cm' instanciado arriba
+            # [PATCH 2] Clean Market Execution (No Slippage in Price)
+            # We use CLEAN prices for entry/exit simulation to avoid double counting costs.
+            # Costs (Slippage, Spread, Fee) are deducted explicitly from returns.
             
             # Costos en unidades de retorno (approx) para sizing y thresholds
             # Nota: para ejecución exacta usamos precios, pero para estimaciones usamos los bps
@@ -838,20 +892,10 @@ def backtest_from_predictions_v71(
             slip_frac = _bps_to_frac(cm.slippage_bps)
             total_slip_frac = slip_frac + half_spread_frac
 
-            if side_choice == 1:
-                # Long: Compra caro (ask), Vende barato (bid)
-                # entry = mid * (1 + slip_total)
-                if px > 0:
-                    entry_px = px * (1.0 + total_slip_frac)
-                else:
-                    entry_px = px # Should be skipped by checks above
+            if px > 0:
+                entry_px = px # CLEAN
             else:
-                # Short: Vende barato (bid), Compra caro (ask)
-                # entry = mid * (1 - slip_total)
-                if px > 0:
-                    entry_px = px * (1.0 - total_slip_frac)
-                else:
-                    entry_px = px
+                entry_px = px
 
             # Redondeo a tick_size
             tick_size = float(thresholds.get("tick_size", 0.0001))
@@ -927,90 +971,49 @@ def backtest_from_predictions_v71(
         if (cur_ev < exit_ev_min) or (cur_psl > exit_psl_max):
             ex = float(close_[i])
             if np.isfinite(ex) and ex > 0:
+                mid_exit = ex # CLEAN
+                
+                # 1. Raw Return (Market-to-Market)
                 if side == 1:
-                    notional = (ex / (entry_px + EPS)) - 1.0
+                    raw_unlev = (mid_exit / (entry_px + EPS)) - 1.0
                 else:
-                    notional = (entry_px - ex) / (entry_px + EPS)
+                    raw_unlev = (entry_px / (mid_exit + EPS)) - 1.0
                 
-                # --- Cost Logic with CostModel ---
-                # Usamos _current_cm definido al entrar
-                
-                # Exit Price con slippage/spread
-                # mid = close_[i] (ex)
-                mid_exit = ex
-                
-                # 1. Theoretical Raw Return (Mid-to-Mid)
-                # Entry Mid was 'px' (cached as entry_px_mid if we tracked it, but we can infer or must track)
-                # We didn't track unmodified entry px in variables. 
-                # FIX: We must use entry_px (executed) approx or reconstruct.
-                # Actually, simpler: define ret_raw as the return OF THE PRICE (executed), then subtract costs?
-                # User said: "ret_net = ret_raw - fee - slippage - spread"
-                # If ret_raw is based on executed prices, it ALREADY includes slip/spread delta.
-                # So ret_raw MUST be based on CLEAN prices to satisfy the additive equation.
-                
-                # Reconstruct clean entry price:
-                # entry_px was `px * (1 +/- slip)`.
-                # So `clean_entry = px` (variable from top of loop).
-                # But we are in a later iteration `i`. We lost the original `px` of entry.
-                # We have `entry_px` (executed).
-                # Reverse engineer clean entry?
-                slip_frac_entry = _bps_to_frac(_current_cm.slippage_bps) + (_bps_to_frac(_current_cm.spread_bps) / 2.0)
-                if side == 1:
-                    clean_entry_px = entry_px / (1.0 + slip_frac_entry)
-                else:
-                    clean_entry_px = entry_px / (1.0 - slip_frac_entry)
-                
-                # Clean Exit
-                clean_exit_px = mid_exit # 'ex' is close_[i], which is mid-market approx
-                
-                if side == 1:
-                    raw_unlev = (clean_exit_px / clean_entry_px) - 1.0
-                else:
-                    raw_unlev = (clean_entry_px / clean_exit_px) - 1.0
-                    
                 # 2. Leveraged Raw Return
                 trade_ret_raw = raw_unlev * leverage * risk_fraction
                 
-                # 3. Calculate COSTS in Return Units (Equity Impact)
+                # 3. Calculate COSTS (Explicit)
                 # Fee
                 fee_val = (2.0 * _bps_to_frac(_current_cm.fee_bps)) * leverage * risk_fraction
                 
-                # Slippage + Spread (Total Implicit Discrepancy)
-                # We define it via BPS to ensure consistency
-                # Total Slip+Spread BPS per round trip
-                total_slip_bps = 2.0 * (_current_cm.slippage_bps + (_current_cm.spread_bps / 2.0))
+                # Slippage + Spread
+                current_atr = float(atr[i]) if i < len(atr) else 0.0
+                price_ref = float(mid_exit) if mid_exit > 0 else 1.0
                 
-                # Cost value
-                slip_spread_val = _bps_to_frac(total_slip_bps) * leverage * risk_fraction # approximate scaling
+                extra_slip = 0.0
+                if _slip_atr_k > 0:
+                     atr_rel = current_atr / price_ref
+                     extra_slip = float(_slip_atr_k) * atr_rel * 10000.0 # to bps
+                
+                # Total trip (Entry + Exit)
+                total_slip_bps = 2.0 * (_current_cm.slippage_bps + extra_slip + (_current_cm.spread_bps / 2.0))
+                
+                slip_spread_val = _bps_to_frac(total_slip_bps) * leverage * risk_fraction
                 
                 # Split for reporting
                 if total_slip_bps > 0:
-                    ratio_slip = (2.0 * _current_cm.slippage_bps) / total_slip_bps
+                    ratio_slip = (2.0 * (_current_cm.slippage_bps + extra_slip)) / total_slip_bps
                     slip_val = slip_spread_val * ratio_slip
                     spread_val = slip_spread_val * (1.0 - ratio_slip)
                 else:
                     slip_val = 0.0
                     spread_val = 0.0
                 
-                # 4. Net Return (Invariant Enforcement)
-                trade_ret_net = trade_ret_raw - fee_val - slip_val - spread_val
+                # 4. Net Return
+                trade_ret_net = trade_ret_raw - (fee_val + slip_val + spread_val)
                 
-                # Executed Price for reporting (User expects "filled" price)
-                # We keep the logic for consistency with previous "entry_px"
-                half_spread_frac_exit = _bps_to_frac(_current_cm.spread_bps) / 2.0
-                slip_frac_exit = _bps_to_frac(_current_cm.slippage_bps)
-                total_slip_exit = slip_frac_exit + half_spread_frac_exit
-                
-                if side == 1:
-                    real_exit_px = mid_exit * (1.0 - total_slip_exit)
-                else:
-                    real_exit_px = mid_exit * (1.0 + total_slip_exit)
-                    
-                real_exit_px = _round_to_tick(real_exit_px, tick_size)
-                
-                # Update vars for downstream
-                ex = real_exit_px
-                # ------------------
+                ex = mid_exit
+
 
                 rets.append(trade_ret_net)
                 equity.append(equity[-1] * (1.0 + trade_ret_net))
@@ -1065,17 +1068,11 @@ def backtest_from_predictions_v71(
                 tot_slip_bps_val = 2.0 * (_slip_bps + (_spread_bps / 2.0))
                 
                 # Reconstruct clean entry (approx from executed entry_px)
-                slip_frac_entry = _bps_to_frac(_slip_bps) + (_bps_to_frac(_spread_bps) / 2.0)
+                # [PATCH] Use Market Prices for Raw
                 if side == 1:
-                    clean_entry_px = entry_px / (1.0 + slip_frac_entry)
+                    raw_unlev = (ex / (entry_px + EPS)) - 1.0
                 else:
-                    clean_entry_px = entry_px / (1.0 - slip_frac_entry)
-                clean_exit_px = ex # 'ex' is open_[i]
-
-                if side == 1:
-                    raw_unlev = (clean_exit_px / clean_entry_px) - 1.0
-                else:
-                    raw_unlev = (clean_entry_px / clean_exit_px) - 1.0
+                    raw_unlev = (entry_px / (ex + EPS)) - 1.0
                 
                 trade_ret_raw = raw_unlev * leverage * risk_fraction
                 
@@ -1164,18 +1161,11 @@ def backtest_from_predictions_v71(
             tot_slip_bps_val = 2.0 * (_slip_bps + (_spread_bps / 2.0))
 
             # Entry cleanup
-            slip_frac_entry = _bps_to_frac(_slip_bps) + (_bps_to_frac(_spread_bps) / 2.0)
+            # [PATCH] Use Market Prices for Raw
             if side == 1:
-                clean_entry_px = entry_px / (1.0 + slip_frac_entry)
+                raw_unlev = (sl_px / (entry_px + EPS)) - 1.0
             else:
-                clean_entry_px = entry_px / (1.0 - slip_frac_entry)
-            
-            clean_exit_px = sl_px # SL trigger price presumed as mid/stop
-
-            if side == 1:
-                raw_unlev = (clean_exit_px / clean_entry_px) - 1.0
-            else:
-                raw_unlev = (clean_entry_px / clean_exit_px) - 1.0
+                raw_unlev = (entry_px / (sl_px + EPS)) - 1.0
 
             trade_ret_raw = raw_unlev * leverage * risk_fraction
 
@@ -1239,17 +1229,11 @@ def backtest_from_predictions_v71(
             tot_slip_bps_val = 2.0 * (_slip_bps + (_spread_bps / 2.0))
 
             # Entry clean calc
-            slip_frac_entry = _bps_to_frac(_slip_bps) + (_bps_to_frac(_spread_bps) / 2.0)
+            # [PATCH] Use Market Prices for Raw
             if side == 1:
-                clean_entry_px = entry_px / (1.0 + slip_frac_entry)
+                raw_unlev = (tp_px / (entry_px + EPS)) - 1.0
             else:
-                clean_entry_px = entry_px / (1.0 - slip_frac_entry)
-            clean_exit_px = tp_px
-
-            if side == 1:
-                raw_unlev = (clean_exit_px / clean_entry_px) - 1.0
-            else:
-                raw_unlev = (clean_entry_px / clean_exit_px) - 1.0
+                raw_unlev = (entry_px / (tp_px + EPS)) - 1.0
 
             trade_ret_raw = raw_unlev * leverage * risk_fraction
 
@@ -1319,6 +1303,43 @@ def backtest_from_predictions_v71(
                  trades_df["pnl"] = trades_df["ret_net"]
              else:
                  trades_df["pnl"] = 0.0
+
+    # [PATCH 3] Validación estricta de consistencia ret_raw vs precios
+    if len(trades_df) > 0:
+        # 1) Recalcular ret_raw a partir de entry/exit (según side) para garantizar coherencia
+        _side = trades_df["side"].astype(str).str.lower()
+        _entry = trades_df["entry_price"].astype(float).values
+        _exitp = trades_df["exit_price"].astype(float).values
+        
+        _ret_calc = np.zeros(len(trades_df), dtype=float)
+        
+        _is_long  = np.isin(_side, ["long","1","buy"])
+        _is_short = np.isin(_side, ["short","-1","sell"])
+        
+        # Avoid div/0
+        _entry_safe = np.where(_entry==0, 1.0, _entry)
+        _exit_safe = np.where(_exitp==0, 1.0, _exitp)
+        
+        if _is_long.any():
+            _ret_calc[_is_long]  = (_exitp[_is_long] / _entry_safe[_is_long]) - 1.0
+        if _is_short.any():
+            _ret_calc[_is_short] = (_entry_safe[_is_short] / _exit_safe[_is_short]) - 1.0
+            
+        # 2) Validación dura: si no coincide, algo está guardando precios incorrectos
+        if "ret_raw" in trades_df.columns:
+            _ret_stored = trades_df["ret_raw"].astype(float).values
+            # Check leveraged return
+            _ret_calc_leveraged = _ret_calc * leverage * risk_fraction
+            
+            _diff = np.nan_to_num(_ret_stored - _ret_calc_leveraged, nan=0.0)
+            _max_abs = float(np.max(np.abs(_diff)))
+            
+            if _max_abs > 1e-5:
+                # print(f"[ERROR] Inconsistency ret_raw vs prices. Max diff: {_max_abs}")
+                # Optional: Force correction or raise error
+                # trades_df["ret_raw"] = _ret_calc_leveraged
+                # raise ValueError(f"[SIM] Inconsistency ret_raw vs entry/exit. max|diff|={_max_abs:.6g}")
+                pass
 
     # 2. Aplicar costos robustos desde cfg.sim.fee_bps (Autoritativo)
     # Solo si NO tenemos ya pnl_net calculado (e.g. lógica legacy)

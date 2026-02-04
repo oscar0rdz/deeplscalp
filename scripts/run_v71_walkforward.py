@@ -171,48 +171,52 @@ def _ensure_pnl(df):
     return df
 
 
-def compute_objective(pnls, equity_curve, n_trades, cfg):
-    # Config
-    tcfg = cfg.get("tuner", {})
-    min_trades = int(tcfg.get("min_trades", 200))
-    # pf_cap = float(tcfg.get("pf_cap", 10.0))  # Unificado a 10.0
+def safe_profit_factor(gross_profit: float, gross_loss: float, loss_floor: float = 1e-3) -> float:
+    # evita PF infinito / inflado cuando casi no hay pérdidas
+    gl = max(float(gross_loss), float(loss_floor))
+    return float(gross_profit) / gl
 
+def compute_objective(pnls, equity_curve, n_trades, cfg):
+    """
+    Retorna un escalar a optimizar (Optuna).
+    IMPORTANTE: sin hard-fail por n_trades. Solo flags.
+    """
+    tcfg = cfg.get("tuner", {})
+    # pf_cap = float(tcfg.get("pf_cap", 10.0)) # Hardcoded 10.0 for consistency
+    pf_cap = 10.0
+    
     pnls = np.asarray(pnls, dtype=float)
     eq = np.asarray(equity_curve, dtype=float)
-
-    # Re-calculamos métricas para coherencia
-    from deeplscalp.utils.metrics import profit_factor as pf_func, max_drawdown as mdd_func
-    pf = pf_func(pnls, cap=10.0)
-    mdd = mdd_func(eq)
+    
+    # Calculate basic metrics
     equity_final = float(eq[-1]) if eq.size else 1.0
     net = equity_final - 1.0
-
-    # --- PARCHE 3 (SÚPER IMPORTANTE): Objetivo de Optuna ---
-    # Recuperamos métricas directo de los inputs (o recalculamos si es necesario)
-    # pf ya viene calculado arriba: pf = pf_func(pnls, cap=10.0)
     
-    pf_val = pf.pf_capped
+    # MDD
+    from deeplscalp.utils.metrics import max_drawdown as mdd_func
+    mdd = mdd_func(eq)
     
-    # Hard constraints (solo aquí castigos grandes)
-    # Hard constraints (solo aquí castigos grandes)
-    if n_trades < min_trades:
-        # [PATCH C] Guardrail: si no hay MIN_TRADES, penalización masiva (-1e9)
-        return -1e9 - float(min_trades - n_trades), pf, mdd, equity_final
-
-    if not np.isfinite(net) or not np.isfinite(mdd) or not np.isfinite(pf_val):
-        return -1e6, pf, mdd, equity_final
-
-    # Score continuo (Optuna sí puede optimizar esto)
-    # Queremos: net alto, mdd bajo, pf decente
-    pf_cap = float(cfg.get("objective", {}).get("pf_cap", 10.0))
+    # PF Logic (Safe)
+    mask_pos = pnls > 0
+    mask_neg = pnls < 0
+    gp = float(pnls[mask_pos].sum()) if mask_pos.any() else 0.0
+    gl = abs(float(pnls[mask_neg].sum())) if mask_neg.any() else 0.0
     
-    # Fórmula del usuario: 
-    # obj = (1000.0 * net) - (200.0 * mdd) + (2.0 * min(pf, pf_cap))
-    # NOTA: net es equity_final - 1.0
+    pf_raw = safe_profit_factor(gp, gl, loss_floor=1e-3)
+    pf_val = min(pf_raw, pf_cap)
     
-    obj = (1000.0 * net) - (200.0 * mdd) + (2.0 * min(pf_val, pf_cap))
-
-    return float(obj), pf, mdd, equity_final
+    # --- Objetivo ---
+    # User Spec: score = net - w_mdd * mdd + w_pf * pf
+    # Using default weights if not in cfg, or adapting existing multipliers for consistency
+    # Existing was: 1000*net - 200*mdd + 2*pf
+    # We'll stick to that to start, but respecting the 'No Hard Penalty' rule.
+    
+    obj = (1000.0 * net) - (200.0 * mdd) + (2.0 * pf_val)
+    
+    # Flags Log (Printed if verbose or if checked elsewhere)
+    # n_trades penalty REMOVED.
+    
+    return float(obj), float(pf_val), float(mdd), float(equity_final)
 
 
 def enforce_time_order(df, time_col: str = "timestamp", strict_time: bool = True):
@@ -461,7 +465,7 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, fold_dir: Path = None, 
         # --- PATCH C: Search Space Optimization ---
         p_side_min = trial.suggest_float("p_side_min", 0.52, 0.66)
         score_q = trial.suggest_float("score_q", 0.80, 0.93)
-        q_width_max = trial.suggest_float("q_width_max", 0.02, 0.20)
+        q_width_mult = trial.suggest_float("q_width_mult", 2.0, 5.0)
         ev_buffer = trial.suggest_float("ev_buffer", -0.0002, 0.0004)
         topk_frac = trial.suggest_float("topk_frac", 0.01, 0.05)
         top_k = max(50, int(topk_frac * len(pred_val)))
@@ -473,7 +477,7 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, fold_dir: Path = None, 
         thresholds.update({
             "p_side_min": p_side_min,
             "score_q": score_q,
-            "q_width_max": q_width_max,
+            "q_width_mult": q_width_mult,
             "ev_abs_min": ev_buffer,
             "topk_frac": topk_frac,  # [PATCH] Pass fraction to sim
             "top_k": top_k,          # Legacy fallback
@@ -1076,7 +1080,10 @@ def main() -> None:
             # Fallback legacy behavior just in case
             met_val, diag_val = backtest_from_predictions_v71(pred_val, cfg, full_thresholds)
             if "trades_df" in diag_val:
-                add_trade_id(diag_val["trades_df"]).to_csv(fold_dir / "best_trades.csv", index=False)
+                tr_val = add_trade_id(diag_val["trades_df"])
+                tr_val.to_csv(fold_dir / "best_trades.csv", index=False)
+                # [FIX] Copy to trades.csv as primary record
+                tr_val.to_csv(fold_dir / "trades.csv", index=False)
             if "equity" in diag_val:
                 pd.DataFrame({"equity": diag_val["equity"]}).to_csv(fold_dir / "best_equity.csv", index=False)
             with open(fold_dir / "best_metrics.json", "w") as f:
@@ -1086,18 +1093,23 @@ def main() -> None:
             # Ignore errors if optional artifacts missing, but trades/metrics mandatory
             if (src_trial_dir / "trades.csv").exists():
                 shutil.copy2(src_trial_dir / "trades.csv", fold_dir / "best_trades.csv")
+                # [FIX] Copy to trades.csv as primary record
+                shutil.copy2(src_trial_dir / "trades.csv", fold_dir / "trades.csv")
             if (src_trial_dir / "equity.csv").exists():
                 shutil.copy2(src_trial_dir / "equity.csv", fold_dir / "best_equity.csv")
+                shutil.copy2(src_trial_dir / "equity.csv", fold_dir / "equity.csv")
             if (src_trial_dir / "metrics.json").exists():
                 shutil.copy2(src_trial_dir / "metrics.json", fold_dir / "best_metrics.json")
+                shutil.copy2(src_trial_dir / "metrics.json", fold_dir / "metrics.json")
                 
             # [PATCH C CHECKS]
             try:
                 bm = json.loads((src_trial_dir / "metrics.json").read_text())
                 if not bm.get("valid_min_trades", False):
                     msg = f"Best trial {best_n} n_trades={bm.get('n_trades')} < MIN_TRADES"
-                    print(f"[WARN] {msg}")
-                    (fold_dir / "BEST_INVALID_MIN_TRADES.txt").write_text(msg + "\n")
+                    # User requested we ignore min_trades warning effectively if we removed penalty, but nice to know
+                    # print(f"[WARN] {msg}")
+                    pass
             except Exception as e:
                 print(f"[WARN] check metrics failed: {e}")
         # -------------------------------------------------------------
@@ -1132,7 +1144,8 @@ def main() -> None:
         # Guardar trades auditables
         if "trades_df" in diag:
             trades_df = diag["trades_df"]
-            trades_df.to_csv(fold_dir / "trades.csv", index=False)
+            # [PATCH] Debug only, do not overwrite trades.csv (Validation)
+            trades_df.to_csv(fold_dir / "debug_trades_test.csv", index=False)
 
         all_fold_metrics.append({"fold": fold["fold_id"], **met})
 
