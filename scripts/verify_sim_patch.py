@@ -86,12 +86,52 @@ def test_sim_cost_invariance():
     else:
         print("[FAIL] Cost invariance broken!")
         
-    # Check assert function
     try:
         assert_trade_cost_consistency(trades)
         print("[PASS] assert_trade_cost_consistency passed.")
     except Exception as e:
         print(f"[FAIL] assert_trade_cost_consistency failed: {e}")
+
+    # --- INTEGRATION TEST: GENERATE ARTIFACTS FOR AUDIT ---
+    import json
+    import shutil
+    from pathlib import Path
+    
+    print("\n--- Generating Mock Artifacts for Audit Test ---")
+    REP_DIR = Path("artifacts/reports_sim")
+    if REP_DIR.exists():
+        shutil.rmtree(REP_DIR)
+    REP_DIR.mkdir(parents=True)
+    
+    # Create Fold 0
+    f0 = REP_DIR / "fold_0"
+    f0.mkdir()
+    
+    # Save trades as best_trades.csv (unified source)
+    trades.to_csv(f0 / "best_trades.csv", index=False)
+    
+    # Save metrics
+    metrics = {
+        "net": float(trades["pnl_net"].sum()),
+        "n_trades": len(trades),
+        "profit_factor": 2.5, # dummy
+        "mdd": 0.1 # dummy
+    }
+    (f0 / "best_metrics.json").write_text(json.dumps(metrics))
+    
+    # Create Summary CSV with "fold_0.0" issue (float)
+    summary_data = [{
+        "fold": 0.0, # <--- The suspicious float
+        "net": metrics["net"],
+        "n_trades": metrics["n_trades"],
+        "profit_factor": 2.5,
+        "mdd": 0.1,
+        "profit_factor_raw": 2.5
+    }]
+    pd.DataFrame(summary_data).to_csv(REP_DIR / "walkforward_summary_audited.csv", index=False)
+    
+    print(f"Created artifacts at {REP_DIR}")
+    print("Now run: python scripts/audit_robust.py --reports artifacts/reports_sim")
 
 if __name__ == "__main__":
     test_sim_cost_invariance()
