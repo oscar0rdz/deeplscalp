@@ -526,6 +526,32 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, fold_dir: Path = None, 
         # w_mdd = 200, w_pf = 2.0 (defaults hardcoded previos)
         obj_score = (1000.0 * net) - (200.0 * mdd) + (2.0 * obj_pf)
         
+        # --- [PATCH A] Robustness Penalties ---
+        # 1. Minimum Trades Penalty
+        min_tr_target = int(cfg.get("tuner", {}).get("min_trades", 200))
+        if ntr < min_tr_target:
+            # Penalidad severa y progresiva:
+            # Si tiene 10 trades vs 200 -> penalidad enorme.
+            # -2000 flat + proporcional al faltante
+            miss = (min_tr_target - ntr) / min_tr_target
+            obj_score -= (2000.0 + 1000.0 * miss)
+            
+        # 2. Inflated PF Penalty
+        # Check flags from metrics
+        is_inflated = bool(metrics.get("flags", {}).get("pf_inflated", False))
+        if is_inflated:
+             obj_score -= 5000.0 # Castigo nuclear para evitar "grial falso"
+             
+        # 3. Gross Loss ~ 0 (redundant with pf_inflated but explicit check)
+        # If gross_loss is tiny but not flagged (edge case), also punish
+        if metrics["gross_loss"] < 1e-6 and metrics["gross_profit"] > 0.01:
+             obj_score -= 5000.0
+             
+        # 4. Valid PF Validity
+        # If PF_raw is infinite or insane, cap wasn't enough? No, PF is capped.
+        # Just ensure we prefer lower realistic PF over capped fake PF.
+        if obj_pf >= pf_cap_val and metrics["gross_loss"] < 0.001:
+             obj_score -= 2000.0        
         # [PATCH B] Save artifacts per trial to avoid re-simulating
         if fold_dir is not None:
              trial_dir = fold_dir / "trials" / f"trial_{trial.number:04d}"

@@ -775,12 +775,23 @@ def backtest_from_predictions_v71(
         final_slip_atr_k = float(sim_conf.get("slippage_atr_k", 0.0))
 
     # Enforce strict minimums if required
+    # [PATCH B] Hard Mode Defaults
     if force_costs:
-        if final_fee_bps < 1e-9: 
-            final_fee_bps = 4.0
-        if final_slip_bps < 1e-9:
-            final_slip_bps = 2.0
+        # Check if we are "gaming" costs with near-zero values
+        _FEE_MIN = 2.0 # at least 2 bps fee
+        _SLIP_MIN = 1.0 # at least 1 bps slip
+        
+        if final_fee_bps < _FEE_MIN:
+            # print(f"[WARN] force_costs=True but fee={final_fee_bps} < {_FEE_MIN}. Forcing hard mode.")
+            final_fee_bps = max(final_fee_bps, 4.0) # Default robusto
             
+        if final_slip_bps < _SLIP_MIN:
+             # print(f"[WARN] force_costs=True but slip={final_slip_bps} < {_SLIP_MIN}. Forcing hard mode.")
+             final_slip_bps = max(final_slip_bps, 2.0)
+             
+        # Also ensure spread logic consistency? Spread usually fixed at 1.0 or user defined.
+        if final_spread_bps < 0.1:
+             final_spread_bps = 1.0            
     # Instantiate CostModel with finalized values
     from deeplscalp.sim.cost_model import CostModel
     cm = CostModel(
