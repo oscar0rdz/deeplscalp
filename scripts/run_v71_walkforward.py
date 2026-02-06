@@ -145,11 +145,11 @@ import math
 
 import shutil
 from deeplscalp.backtest.sim_v71 import (backtest_from_predictions_v71,
-                                         profit_factor_stats, add_trade_id)
+                                         profit_factor_stats, add_trade_id, stress_suite_v71)
 from deeplscalp.modeling.calibration_v71 import (apply_temperature_multiclass,
                                                  fit_temperature_multiclass)
 from deeplscalp.modeling.train_v71 import predict_v71, train_model_v71
-from deeplscalp.utils.metrics import max_drawdown, profit_factor
+from deeplscalp.metrics import compute_metrics_from_trades, equity_curve_from_pnl
 
 
 def _ensure_pnl(df):
@@ -500,28 +500,31 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, fold_dir: Path = None, 
 
         # --- PATCH: robust scoring fallback ---
         trades_df = diag.get("trades_df")
-        trades_df = _ensure_pnl(trades_df)
-        pnl = pd.to_numeric(trades_df["pnl"], errors="coerce").fillna(0.0).to_numpy()
+        
+        # Uso centralizado de metrics.py
+        # Recuperamos config de equity_mode y pf_cap
+        eq_mode = cfg.get("sim", {}).get("equity_mode", "compound")
+        pf_cap_val = float(obj_cfg.get("pf_cap", 10.0))
+        
+        metrics = compute_metrics_from_trades(
+            trades_df,
+            pnl_col="pnl_net",
+            equity_mode=eq_mode,
+            pf_cap=pf_cap_val
+        )
 
-        # [CONSISTENCY FIX] Ensure equity starts at 1.0 to allow valid % MDD and PF calc
-        equity_curve = 1.0 + np.cumsum(pnl)
-
-        gross_profit = pnl[pnl > 0].sum()
-        gross_loss = (-pnl[pnl < 0]).sum()
-
-        eps = 1e-12
-        # pf_raw = (gross_profit / max(gross_loss, eps)) if gross_loss > eps else float("nan")
-        net = float(pnl.sum())
-
-        # equity curve para MDD usa la versión Unit-Based calculada arriba
-        # equity_curve = np.cumsum(pnl) <--- CAUSANTE DEL BUG MDD > 1.0
-        # --------------------------------------
-
-        ntr = int(_pick(met, ["ntr_x2", "n_trades_x2", "n_trades"], 0))
-        # trade_rets = diag.get("trade_ret_raw", np.array([]))
-        # equity_curve = diag.get("equity", [1.0])
-
-        obj_score, pf, mdd, equity_final = compute_objective(pnl, equity_curve, ntr, cfg)
+        # Extraer métricas para el objetivo
+        ntr = metrics["n_trades"]
+        mdd = metrics["mdd"]
+        obj_pf = metrics["profit_factor"]  # capped
+        pf_raw = metrics["profit_factor_raw"]
+        net = metrics["net"]
+        equity_final = metrics["equity_final"]
+        
+        # Calculamos score (usando lógica standard)
+        # score = net - w_mdd * mdd + w_pf * pf
+        # w_mdd = 200, w_pf = 2.0 (defaults hardcoded previos)
+        obj_score = (1000.0 * net) - (200.0 * mdd) + (2.0 * obj_pf)
         
         # [PATCH B] Save artifacts per trial to avoid re-simulating
         if fold_dir is not None:
@@ -533,19 +536,19 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, fold_dir: Path = None, 
                  tr_out = add_trade_id(trades_df)
                  tr_out.to_csv(trial_dir / "trades.csv", index=False)
                  
-             # Save equity
-             pd.DataFrame({"equity": equity_curve}).to_csv(trial_dir / "equity.csv", index=False)
+                 # Save equity consistently
+                 # Re-generamos la curva exactamente igual que metrics
+                 pnl = pd.to_numeric(trades_df["pnl_net"], errors="coerce").fillna(0.0).to_numpy()
+                 eq = equity_curve_from_pnl(pnl, mode=eq_mode, start=1.0)
+                 pd.DataFrame({"equity": eq}).to_csv(trial_dir / "equity.csv", index=False)
              
              # Save metrics including obj_score and validity
-             met_out = dict(met)
-             met_out["objective"] = obj_score
-             met_out["pf"] = pf.pf_capped
-             met_out["mdd"] = mdd
-             met_out["equity_final"] = equity_final
+             met_out = dict(metrics)
+             met_out["objective"] = float(obj_score)
              met_out["valid_min_trades"] = bool(ntr >= int(cfg.get("tuner", {}).get("min_trades", 200)))
              (trial_dir / "metrics.json").write_text(json.dumps(met_out, indent=2))
 
-        print(f"[tuner] pf_raw={pf.pf_raw:.3f} pf_capped={pf.pf_capped:.3f} mdd={mdd:.3f} ntr={ntr} net={equity_final-1:.3f} obj={obj_score:.3f}")
+        print(f"[tuner] pf_raw={pf_raw:.3f} pf_capped={obj_pf:.3f} mdd={mdd:.3f} ntr={ntr} net={net:.3f} obj={obj_score:.3f}")
         return float(obj_score)
     return obj
 
@@ -590,140 +593,53 @@ def pipeline_build(args):
     subprocess.run([sys.executable, "pipeline.py", "--config", args.config, "build"], check=True)
 
 
-def recompute_walkforward_summary_from_artifacts(summary_csv: str, reports_dir: str, out_csv: str = None):
-    """
-    Recalcula net/mdd/winrate/n_trades/equity_final/PF desde artefactos de cada fold.
-    Prioridad:
-      - fold_k/trades.csv
-      - equity: fold_k/equity.csv si existe; si no, reconstruye equity = 1 + cumsum(pnl_net o pnl)
-    """
-    import numpy as np
-    import pandas as pd
-    from pathlib import Path
+    # --- PATCH: Unified summary using best_metrics.json ---
+    # Ahora que guardamos todo en metrics.json/best_metrics.json con formato unificado,
+    # simplemente agregamos esos JSONs.
 
-    def max_drawdown(equity):
-        equity = np.asarray(equity, dtype=float)
-        peak = np.maximum.accumulate(equity)
-        dd = (peak - equity) / np.where(peak == 0, np.nan, peak)
-        return float(np.nanmax(dd))
-
-    def profit_factor(pnl):
-        pnl = np.asarray(pnl, dtype=float)
-        gp = pnl[pnl > 0].sum()
-        gl = -pnl[pnl < 0].sum()
-        if gl <= 1e-12:
-            return float("nan")
-        return float(gp / gl)
-
-    s = pd.read_csv(summary_csv)
-    rep = Path(reports_dir)
-
+    import json
     rows = []
-    def normalize_fold_val(x):
-        try:
-            return int(float(x))
-        except:
-            return x
-
-    for fold in s["fold"].tolist():
-        # FIX: Robust fold casting and path construction (fold_0.0 fix)
-        # Apply Patch D logic locally
-        fold_id = normalize_fold_val(fold)
-
-        fdir = rep / f"fold_{fold_id}"
-        
-        # FIX: Prioritize best_trades.csv (User requirement: Unified metric source)
-        best_tr_path = fdir / "best_trades.csv"
-        tr_path = fdir / "trades.csv"
-        
-        target_path = best_tr_path if best_tr_path.exists() else tr_path
-        
-        if not target_path.exists():
-             print(f"[WARN] Falta trades en {fdir} (buscado: best_trades.csv o trades.csv)")
-             continue
-
-        tr = pd.read_csv(target_path)
-        pnl_col = "pnl_net" if "pnl_net" in tr.columns else ("pnl" if "pnl" in tr.columns else None)
-        if pnl_col is None:
-            # Try ret_net
-            pnl_col = "ret_net" if "ret_net" in tr.columns else None
+    
+    rep = Path(reports_dir)
+    # Detect folders
+    fold_dirs = sorted([d for d in rep.iterdir() if d.is_dir() and d.name.startswith("fold_")])
+    
+    for fdir in fold_dirs:
+        # Intenta best_metrics.json (post-audit) o metrics.json (last trial)
+        met_path = fdir / "best_metrics.json"
+        if not met_path.exists():
+            met_path = fdir / "metrics.json"
             
-        if pnl_col is None:
-            print(f"[SKIP] {target_path} no tiene pnl/pnl_net/ret_net")
+        if not met_path.exists():
             continue
-
-        pnl = tr[pnl_col].astype(float).to_numpy()
-        ntr = int(len(tr))
-        wr = float((pnl > 0).mean()) if ntr else 0.0
-        pf = profit_factor(pnl)
-
-        eq_path = fdir / "equity.csv"
-        if not eq_path.exists():
-            eq_path = fdir / "best_equity.csv"
-
-        if eq_path.exists():
-            eq = pd.read_csv(eq_path)
-            # detecta columna equity
-            eq_col = None
-            for c in ["equity","eq","balance","equity_curve"]:
-                if c in eq.columns:
-                    eq_col = c
-                    break
-            if eq_col is None:
-                # 1 col numérica
-                num_cols = [c for c in eq.columns if np.issubdtype(eq[c].dtype, np.number)]
-                eq_col = num_cols[0] if len(num_cols)==1 else None
             
-            if eq_col:
-                equity = eq[eq_col].astype(float).to_numpy()
-            else:
-                equity = 1.0 + np.cumsum(pnl)
-        else:
-            # reconstrucción consistente: equity inicia en 1
-            equity = 1.0 + np.cumsum(pnl)
+        try:
+            data = json.loads(met_path.read_text())
+            # Add fold info
+            fold_id = int(fdir.name.split("_")[-1])
+            data["fold"] = fold_id
+            
+            # Flatten flags if dict
+            if isinstance(data.get("flags"), dict):
+                 data["flags"] = "|".join([f"{k}={v}" for k,v in data["flags"].items()])
 
-        net = float(equity[-1] - equity[0]) if len(equity) else 0.0
-        # mdd = max_drawdown(equity) if len(equity) else 0.0
-        mdd = _compute_mdd_abs(equity) if len(equity) else 0.0
-        eq_final = float(equity[-1]) if len(equity) else 1.0
+            rows.append(data)
+        except Exception as e:
+            print(f"[WARN] Error leyendo {met_path}: {e}")
 
-        # --- Sanity Flags (P3) ---
-        flags = []
-        if mdd > 1.0:
-            flags.append("MDD_GT_1")
-        
-        # Check defaults for sanity
-        # Warning: we don't have cfg here easily unless passed. 
-        # Assuming defaults or relying on external audit script for fee/slip flags.
-        # But we can try heuristics if we had 'fee_sum' or 'slippage_sum' in trades.
-        # But trades.csv logic above didn't extract 'fee' or 'slippage' sum.
-        # Let's keep it simple for now or extract if cols exist.
-        if "slippage" in tr.columns:
-             slip_sum = float(tr["slippage"].sum())
-             # We assume if slippage col exists and is 0.0 but trades > 0, suspicious?
-             # Only if we KNEW slippage_bps > 0.
-        
-        rows.append({
-            "fold": int(fold),
-            "net": net,
-            "mdd": mdd,
-            "profit_factor_raw": pf,
-            "profit_factor_recalc": pf, 
-            "n_trades": ntr,
-            "winrate": wr,
-            "equity_final": eq_final,
-            "flags": "|".join(flags)
-        })
+    if not rows:
+        print("[WARN] No se encontraron metrics para generar summary.")
+        return
 
-    s2 = s.copy()
-    if rows:
-        rr = pd.DataFrame(rows)
-        # Merge on fold
-        s2 = s2.drop(columns=[c for c in rr.columns if c in s2.columns and c!="fold"], errors="ignore").merge(rr, on="fold", how="left")
-
+    df = pd.DataFrame(rows)
+    # Sort columns nicely
+    cols = ["fold", "net", "mdd", "profit_factor", "profit_factor_raw", "n_trades", "winrate", "equity_final", "pf_inflated", "gross_profit", "gross_loss"]
+    final_cols = [c for c in cols if c in df.columns] + [c for c in df.columns if c not in cols]
+    df = df[final_cols]
+    
     out = out_csv or summary_csv
-    s2.to_csv(out, index=False)
-    print(f"[OK] recomputed summary -> {out}")
+    df.to_csv(out, index=False)
+    print(f"[OK] recomputed unified summary -> {out}")
 
 
 def sanitize_walkforward_summary(summary_csv: str, sane_csv: str, min_trades=DEFAULT_MIN_TRADES, pf_cap=DEFAULT_PF_CAP):
@@ -1133,6 +1049,14 @@ def main() -> None:
             ))
 
         met, diag = backtest_from_predictions_v71(pred_test, cfg, full_thresholds)
+
+        # [PATCH] Stress Testing (Automatic x2/x3 + adaptive)
+        try:
+             print(f"[TEST] Running stress suite for Fold {fold['fold_id']}...")
+             stress_met, stress_diag = stress_suite_v71(pred_test, cfg, full_thresholds)
+             (fold_dir / "stress_test.json").write_text(json.dumps(stress_met, indent=2))
+        except Exception as e:
+             print(f"[WARN] Stress suite failed: {e}")
 
         fold_dir = out_dir / "reports" / f"fold_{fold['fold_id']}"
         _ensure_dir(fold_dir)
