@@ -1112,11 +1112,27 @@ def main() -> None:
     )
     
     # --- AUDIT: recompute summary from artifacts to avoid VAL/TEST mix ---
-    recompute_walkforward_summary_from_artifacts(
-        str(out_dir / "reports" / "walkforward_summary.csv"),
-        str(out_dir / "reports"),
-        out_csv=str(out_dir / "reports" / "walkforward_summary_recalc.csv"),
-    )
+    try:
+        # Intenta importar si existe
+        from deeplscalp.backtest.sim_v71 import recompute_walkforward_summary_from_artifacts
+    except ImportError:
+        try:
+             # Fallback attempt
+             from deeplscalp.tools.audit_wf import recompute_walkforward_summary_from_artifacts
+        except ImportError:
+             recompute_walkforward_summary_from_artifacts = None
+
+    if recompute_walkforward_summary_from_artifacts:
+        try:
+            recompute_walkforward_summary_from_artifacts(
+                str(out_dir / "reports" / "walkforward_summary.csv"),
+                str(out_dir / "reports"),
+                out_csv=str(out_dir / "reports" / "walkforward_summary_recalc.csv"),
+            )
+        except Exception as e:
+            print(f"[WARN] Error ejecutando recompute_walkforward_summary_from_artifacts: {e}")
+    else:
+        print("[WARN] recompute_walkforward_summary_from_artifacts no encontrado. Saltando paso.")
 
     # === AUDIT (source-of-truth metrics) ===
     try:
