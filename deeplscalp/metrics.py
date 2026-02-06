@@ -34,7 +34,8 @@ def max_drawdown(equity: np.ndarray) -> float:
     if equity.size == 0:
         return 0.0
     peak = np.maximum.accumulate(equity)
-    dd = 1.0 - (equity / np.where(peak == 0, 1.0, peak))
+    # Evitar division por cero si peak es 0
+    dd = 1.0 - (equity / np.maximum(peak, 1e-12))
     return float(np.max(dd))
 
 def profit_factor_from_pnl(
@@ -45,10 +46,18 @@ def profit_factor_from_pnl(
     pnl = np.asarray(pnl, dtype=float)
     pnl = pnl[np.isfinite(pnl)]
     gp = float(pnl[pnl > 0].sum())
-    gl = float((-pnl[pnl < 0]).sum())
-    pf_raw = float("inf") if gl <= 0.0 else gp / gl
+    gl = float(abs(pnl[pnl < 0].sum())) # Ensure positive magnitude
+    
+    if gl <= 0.0:
+        pf_raw = float("inf")
+    else:
+        pf_raw = gp / gl
+
     pf_capped = float(min(pf_raw, pf_cap)) if np.isfinite(pf_raw) else float(pf_cap)
+    
+    # Flag if generic inflation condition met (low loss, some profit)
     pf_inflated = bool(gl < gross_loss_warn and gp > 0.0)
+    
     return PFStats(pf_raw=pf_raw, pf_capped=pf_capped, gross_profit=gp, gross_loss=gl, pf_inflated=pf_inflated)
 
 def sortino_ratio(pnl: np.ndarray, eps: float = 1e-12) -> float:
@@ -58,7 +67,7 @@ def sortino_ratio(pnl: np.ndarray, eps: float = 1e-12) -> float:
         return 0.0
     downside = pnl[pnl < 0]
     if downside.size == 0:
-        return float("inf")
+        return float("inf") # O un valor alto capado like 100.0? 'inf' es correcto matematicamente.
     dd = float(np.sqrt(np.mean(downside ** 2)) + eps)
     mu = float(np.mean(pnl))
     return float(mu / dd)
@@ -97,6 +106,10 @@ def compute_metrics_from_trades(
     flags = {}
     if pf.pf_inflated:
         flags["pf_inflated"] = f"pf_raw={pf.pf_raw:.2f} gross_loss={pf.gross_loss:.4g}"
+    
+    # Check for NaN consistency in critical metrics
+    if not np.isfinite(net) or not np.isfinite(mdd):
+        flags["nan_guard"] = f"net={net} mdd={mdd}"
 
     return {
         "net": net,

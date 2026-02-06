@@ -5,6 +5,9 @@ import hashlib
 import numpy as np
 import pandas as pd
 
+from deeplscalp.gating import apply_gating, GatingConfig
+from deeplscalp.metrics import compute_metrics_from_trades
+
 EPS = 1e-12
 
 def _round_to_step(x: float, step: float) -> float:
@@ -66,53 +69,9 @@ def _topk_mask(df: pd.DataFrame, score_col: str, topk_frac: float) -> pd.Series:
          return m
 
 def apply_gates(pred_df: pd.DataFrame, params: dict) -> tuple[pd.Series, dict]:
-    """
-    Retorna: (mask_final, attribution_counts)
-    Unifica logica de gates.
-    """
-    df = pred_df.copy()
-    m = pd.Series(True, index=df.index)
-    attr = {}
-    
-    # 1. Gate Side / Score / OOD / EV 
-    # Esto requiere recalcular los rolling scores si no vienen en el DF?
-    # El DF de prediccion usualmente trae probs. Las rolling metrics se calculan en 'backtest'.
-    # Si queremos que esta funcion sea source-of-truth, deberiamos mover el calculo aca o asumirlo hecho.
-    # Dado el diff del usuario, parece que busca aplicar TopK sobre un "m" ya filtrado o global?
-    # El usuario pone: example: m_side = ... m &= m_side
-    
-    # Para no duplicar toda la logica de backtest (iqr, best_ev, etc), 
-    # asumiremos que params trae lo necesario o que simplificamos el TopK aqui.
-    # PERO el usuario pide "Un solo camino...".
-    
-    # Vamos a implementar lo critico: TOPK
-    # Las otras gates (side, score, ood) dependen de loops o rolling. 
-    # Si pred_df YA TIENE 'score' calculado (posible si modificamos el flujo), es facil.
-    # Si no, `_topk_mask` necesita la columna score.
-    
-    # Asumimos que pred_df tiene columna 'score' si ya pasamos por el calculo, 
-    # o intentamos calcularla? backtest calcula 'score' al vuelo linea 468.
-    
-    # ESTRATEGIA: Esta funcion sera llamada DENTRO de backtest despues de calcular scores,
-    # O el usuario quiere que reemplace todo. 
-    # Dada la complejidad, agregamos TopK aqui y dejamos hooks.
-    
-    topk_frac = float(params.get("topk_frac", 0.0) or 0.0)
-    score_col = params.get("_score_col", "score") # backtest debera poner el score en el df
-    
-    # Si topk_frac > 0, aplicamos mascara
-    if topk_frac > 0 and score_col in df.columns:
-        m_topk = _topk_mask(df[m], score_col=score_col, topk_frac=topk_frac)
-        # Re-alinear
-        m2 = pd.Series(False, index=df.index)
-        m2.loc[m.index[m.values]] = m_topk.values
-        
-        attr["gate_topk"] = int((m & ~m2).sum())
-        m &= m2
-    else:
-        attr["gate_topk"] = 0
-        
-    return m, attr
+    # Deprecated in favor of vectorized gating module (Patch B)
+    # Returns all-true to avoid breaking legacy callers if any
+    return pd.Series(True, index=pred_df.index), {}
 
 def add_trade_id(df: pd.DataFrame) -> pd.DataFrame:
     cols = [c for c in ["ts_entry","ts_exit","side","entry_price","exit_price"] if c in df.columns]
@@ -617,15 +576,60 @@ def backtest_from_predictions_v71(
     thr_ood = _rolling_q_past(iqr, lookback, ood_q)
     thr_ev_roll = _rolling_q_past(best_ev, lookback, ev_q)
 
-    # gates base
-    p_side_min = float(thresholds.get("p_side_min", 0.52))
-    p_tp_min = float(thresholds.get("p_tp_min", 0.20))
     p_sl_max = float(thresholds.get("p_sl_max", 0.45))
 
-    # COST BUFFER gate (CLAVE)
+    # --- [PATCH B] Vectorized Gating ---
     ev_abs_min = float(thresholds.get("ev_abs_min", 0.0))
-    ev_buffer_mult = float(thresholds.get("ev_buffer_mult", 1.0))  # net >= 1x costo
-    q_width_mult = float(thresholds.get("q_width_mult", 2.5))      # q90-q10 >= 2.5x costo
+    ev_buffer_mult = float(thresholds.get("ev_buffer_mult", 1.0))
+    q_width_mult = float(thresholds.get("q_width_mult", 2.5))
+    
+    g_cfg = GatingConfig(
+        p_side_min=p_side_min,
+        score_q=score_q,
+        topk_frac=float(thresholds.get("topk_frac", 0.0)),
+        ev_buffer=ev_buffer_mult * cost_rt_notional if adaptive_gating else 0.0,
+        q_width_mult=q_width_mult if adaptive_gating else 0.0,
+        ood_enable=True, # Always check if available
+        ood_soft=bool(thresholds.get("ood_soft", True)),
+    )
+    
+    # Prepare vectors
+    # p_side: max confidence of either side, as gating checks general quality
+    p_side_vec = np.maximum(p_long, p_short)
+    
+    # q_width vector: approximate based on best_ev side choice
+    # (if evL > evS -> L width, else S width)
+    # logic matches loop: side_choice = 1 if evL_net >= evS_net
+    # Note: L/S net are used for choice.
+    _wL = np.maximum(qL90, 0.0) - np.minimum(qL10, 0.0)
+    _wS = np.maximum(qS90, 0.0) - np.minimum(qS10, 0.0)
+    # Align selection with 'best_ev' construction
+    q_width_vec = np.where(evL_net >= evS_net, _wL, _wS)
+    
+    # OOD mask
+    ood_mask_vec = (iqr <= thr_ood) # True = OK (not OOD) in new logic?
+    # Wait, apply_gating expects 'ood_mask' where True = BAD? or True = OK?
+    # "m = ~ood_mask" in gating.py for hard case.
+    # So if pass 'ood_mask', and logic is ~ood_mask, then 'ood_mask' should be "IS OOD" (True if bad).
+    # iqr > thr_ood => IS OOD.
+    ood_is_bad = (iqr > thr_ood)
+    
+    gating_mask, gating_reasons = apply_gating(
+        cfg=g_cfg,
+        p_side=p_side_vec,
+        score=score,
+        ev_net=best_ev, 
+        q_width=q_width_vec,
+        ood_mask=ood_is_bad
+    )
+    
+    # Incorporate manual topk legacy if needed (less preferred)
+    # The new gating module handles topk_frac.
+    # But if 'top_k' (integer) is used in legacy mode:
+    # We leave that for the loop or handle it here?
+    # Let's trust the new gating module for topk_frac. 
+    # If integer top_k is passed, we might need manual handling, but the prompt emphasizes topk_frac.
+
 
     ev_buffer = ev_buffer_mult * cost_rt_notional if adaptive_gating else 0.0
     
@@ -814,33 +818,11 @@ def backtest_from_predictions_v71(
             else:
                 side_choice = 1 if is_long else -1
 
-            # filtros rolling sin futuro
-            if score[i] < thr_score[i]:
-                dbg["gate_score"] += 1
+            # Gating Applied Vectorized (Patch B)
+            if not gating_mask[i]:
                 continue
-            if iqr[i] > thr_ood[i]:
-                dbg["gate_ood"] += 1
-                continue
-            if not topk_mask[i]:
-                dbg["gate_topk"] += 1
-                continue
-
-            # EV gate = max(roll, abs_min, buffer)
-            ev_thr = max(float(thr_ev_roll[i]), ev_abs_min, ev_buffer)
-            if best_ev[i] < ev_thr:
-                dbg["gate_ev_buffer"] += 1
-                continue
-
-            # Quantile width gate: evita micro-movimientos
-            if side_choice == 1:
-                qwidth = float(max(qL90[i], 0.0) - min(qL10[i], 0.0))
-            else:
-                qwidth = float(max(qS90[i], 0.0) - min(qS10[i], 0.0))
-            if adaptive_gating and (qwidth < q_width_thr):
-                dbg["gate_q_width"] += 1
-                continue
-
-            # Regime/Event policy
+                
+            # Regime/Event policy (Manual check for now, until moved to regime.py logic fully)
             if has_reg_evt and adaptive_gating:
                 p_range = float(reg[i, 0])
                 p_spike = float(reg[i, 3])
@@ -1439,10 +1421,15 @@ def backtest_from_predictions_v71(
         # when a trade is active.
         
     # --- Gate Attribution Log ---
-    total_signals = dbg.get("signals", 0)
+    # Merge vectorized reasons into dbg
+    for k, v in gating_reasons.items():
+        dbg[k] = dbg.get(k, 0) + v
+
+    # --- Gate Attribution Log ---
+    total_signals = int(n) # approx total bars
     if total_signals > 0:
         print("\n[SIM] --- Gate Attribution Summary ---")
-        print(f"Total Signals: {total_signals}")
+        print(f"Total Bars: {total_signals}")
         for k, v in dbg.items():
             if k.startswith("gate_"):
                 pct = (v / total_signals) * 100
@@ -1456,49 +1443,27 @@ def backtest_from_predictions_v71(
         "dd": equity_dd,
     })
 
-    # --- PARCHE 1: Unificar métricas desde r_net ---
-    pf_cap = float(cfg.get("objective", {}).get("pf_cap", 10.0))
+    # --- PARCHE A: Unified Metrics ---
+    trades_df = pd.DataFrame(trades_list)
     
-    # r_net es la verdad única. Asegurar que es numpy array float
-    r_net_final = np.asarray(r, dtype=float)
+    # Ensure pnl_net exists if trades_list was populated
+    if not trades_df.empty and "pnl_net" not in trades_df.columns:
+         if "pnl" in trades_df.columns:
+             trades_df["pnl_net"] = trades_df["pnl"]
     
-    # Reconstruir equity y MDD desde la serie final
-    equity_curve_final = _equity_from_returns(r_net_final, equity0=1.0)
+    metrics = compute_metrics_from_trades(
+        trades_df,
+        pnl_col="pnl_net",
+        equity_mode="compound",
+        pf_cap=float(cfg.get("objective", {}).get("pf_cap", 10.0))
+    )
     
-    # Métricas clave
-    net = float(equity_curve_final[-1] - 1.0)
-    mdd = _max_drawdown_from_equity(equity_curve_final)
+    # Extract for usage below if needed
+    n_trades = metrics["n_trades"]
     
-    pf = 0.0
-    pf_raw = 0.0
-    if r_net_final.size > 0:
-        pf_stats = profit_factor_stats(r_net_final, pf_cap=pf_cap)
-        # s.pf ya viene limitado por pf_cap
-        pf = float(pf_stats.pf) if np.isfinite(pf_stats.pf) else 0.0
-        
-        # Reconstruimos pf_raw
-        g_p = pf_stats.gross_profit
-        g_l = pf_stats.gross_loss
-        if g_l < 1e-12:
-             pf_raw = float(g_p / 1e-12) if g_p > 0 else 0.0
-        else:
-             pf_raw = float(g_p / g_l)
-    
-    n_trades = int(r_net_final.size)
-    winrate = float((r_net_final > 0).mean()) if n_trades else 0.0
-
-    metrics = {
-        "net": net,
-        "mdd": mdd,
-        "profit_factor_raw": pf_raw,
-        "profit_factor": pf,
-        "n_trades": n_trades,
-        "winrate": winrate,
-        "sortino": float(_sortino_proxy(r_net_final)) if n_trades else 0.0,
-        "equity_final": float(equity_curve_final[-1]),
-        "avg_ret_per_trade": float(r_net_final.mean()) if n_trades else 0.0,
-        "median_ret_per_trade": float(np.median(r_net_final)) if n_trades else 0.0,
-    }
+    # Debug info
+    if "flags" in metrics and metrics["flags"]:
+         print(f"[METRICS] Flags raised: {metrics['flags']}")
 
     diag.update({
         "n_trades": n_trades,

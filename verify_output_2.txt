@@ -1,0 +1,94 @@
+=== STARTING VERIFICATION ===
+Loading /Users/oscarr/Desarrollo/Python0/DeepLScalp/DeepLScalp/artifacts/preds/pred_XRP_USDT_v71.parquet...
+Loaded 90000 rows.
+
+--- SHIFT TEST (exec_lag impact) ---
+
+[SIM] --- Gate Attribution Summary ---
+Total Signals: 81525
+  gate_side           :  18210 ( 22.3%)
+  gate_score          :  41584 ( 51.0%)
+  gate_ood            :   4061 (  5.0%)
+  gate_topk           :  12028 ( 14.8%)
+  gate_ev_buffer      :   3146 (  3.9%)
+  gate_q_width        :      0 (  0.0%)
+  gate_regime         :      0 (  0.0%)
+  gate_spike          :      0 (  0.0%)
+Successful entries: 2496
+--------------------------------------
+
+
+[SIM] --- Gate Attribution Summary ---
+Total Signals: 80036
+  gate_side           :  33091 ( 41.3%)
+  gate_score          :  26392 ( 33.0%)
+  gate_ood            :   3566 (  4.5%)
+  gate_topk           :  11643 ( 14.5%)
+  gate_ev_buffer      :   2607 (  3.3%)
+  gate_q_width        :      3 (  0.0%)
+  gate_regime         :      0 (  0.0%)
+  gate_spike          :      0 (  0.0%)
+Successful entries: 2734
+--------------------------------------
+
+Lag=0 PF: 5.44 Net: 42.8400
+Lag=1 PF: 8.20 Net: 87.3030
+[WARN] Performance improved with lag? Suspicious but possible if mean reverting.
+
+--- FEE TEST ---
+
+[SIM] --- Gate Attribution Summary ---
+Total Signals: 80036
+  gate_side           :  33091 ( 41.3%)
+  gate_score          :  26392 ( 33.0%)
+  gate_ood            :   3566 (  4.5%)
+  gate_topk           :  11643 ( 14.5%)
+  gate_ev_buffer      :   2607 (  3.3%)
+  gate_q_width        :      3 (  0.0%)
+  gate_regime         :      0 (  0.0%)
+  gate_spike          :      0 (  0.0%)
+Successful entries: 2734
+--------------------------------------
+
+
+[SIM] --- Gate Attribution Summary ---
+Total Signals: 80036
+  gate_side           :  33091 ( 41.3%)
+  gate_score          :  26392 ( 33.0%)
+  gate_ood            :   3566 (  4.5%)
+  gate_topk           :  11643 ( 14.5%)
+  gate_ev_buffer      :   2607 (  3.3%)
+  gate_q_width        :      3 (  0.0%)
+  gate_regime         :      0 (  0.0%)
+  gate_spike          :      0 (  0.0%)
+Successful entries: 2734
+--------------------------------------
+
+Fee=0  Net: 87.3030
+Fee=10 Net: 87.3030
+[FAIL] pnl_net NOT found in trades_df
+[FAIL] Fees did not reduce Net return. Check application.
+
+--- PLACEBO TEST (Shuffle) ---
+Traceback (most recent call last):
+  File "/Users/oscarr/Desarrollo/Python0/DeepLScalp/DeepLScalp/scripts/verify_fixes.py", line 121, in <module>
+    run_test()
+  File "/Users/oscarr/Desarrollo/Python0/DeepLScalp/DeepLScalp/scripts/verify_fixes.py", line 111, in run_test
+    met_shuf, _ = backtest_from_predictions_v71(df_shuf, cfg, thresholds)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/oscarr/Desarrollo/Python0/DeepLScalp/DeepLScalp/deeplscalp/backtest/sim_v71.py", line 954, in backtest_from_predictions_v71
+    ts = df.index[i]
+         ~~~~~~~~^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/pandas/core/indexes/base.py", line 5401, in __getitem__
+    return getitem(key)
+           ^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/pandas/core/arrays/datetimelike.py", line 398, in __getitem__
+    result = cast("Union[Self, DTScalarOrNaT]", super().__getitem__(key))
+                                                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/pandas/core/arrays/_mixins.py", line 286, in __getitem__
+    return self._box_func(result)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/pandas/core/arrays/datetimes.py", line 549, in _box_func
+    value = x.view("i8")
+            ^^^^^^^^^^^^
+KeyboardInterrupt

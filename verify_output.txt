@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/Users/oscarr/Desarrollo/Python0/DeepLScalp/DeepLScalp/scripts/verify_fixes.py", line 5, in <module>
+    from deeplscalp.backtest.sim_v71 import backtest_from_predictions_v71
+  File "/Users/oscarr/Desarrollo/Python0/DeepLScalp/DeepLScalp/deeplscalp/backtest/sim_v71.py", line 1076
+    """
+    ^
+SyntaxError: unterminated triple-quoted string literal (detected at line 1093)

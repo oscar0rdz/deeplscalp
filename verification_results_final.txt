@@ -1,0 +1,97 @@
+=== STARTING ROBUST VERIFICATION ===
+[INFO] Reading parquet: /Users/oscarr/Desarrollo/Python0/DeepLScalp/DeepLScalp/artifacts/preds/pred_XRP_USDT_v71.parquet
+[INFO] DatetimeIndex detected suitable.
+[INFO] Slicing data from 90000 to 25000 rows for speed.
+
+--- TEST 1: EXEC LAG (Anti-Lookahead) ---
+Running lag=0...
+
+[SIM] --- Gate Attribution Summary ---
+Total Signals: 22627
+  gate_side           :   5075 ( 22.4%)
+  gate_score          :  10819 ( 47.8%)
+  gate_ood            :   1839 (  8.1%)
+  gate_topk           :   3370 ( 14.9%)
+  gate_ev_buffer      :    840 (  3.7%)
+  gate_q_width        :      0 (  0.0%)
+  gate_regime         :      0 (  0.0%)
+  gate_spike          :      0 (  0.0%)
+Successful entries: 684
+--------------------------------------
+
+-> Lag=0 | Net: 0.1166, PF: 4.42
+Running lag=1...
+
+[SIM] --- Gate Attribution Summary ---
+Total Signals: 22088
+  gate_side           :   9246 ( 41.9%)
+  gate_score          :   6821 ( 30.9%)
+  gate_ood            :   1507 (  6.8%)
+  gate_topk           :   3101 ( 14.0%)
+  gate_ev_buffer      :    629 (  2.8%)
+  gate_q_width        :      2 (  0.0%)
+  gate_regime         :      0 (  0.0%)
+  gate_spike          :      0 (  0.0%)
+Successful entries: 782
+--------------------------------------
+
+-> Lag=1 | Net: 0.1566, PF: 6.82
+[WARN] Performance IMPROVED with lag? (0.1566 > 0.1166). Unusual.
+
+--- TEST 2: FEE SENSITIVITY ---
+Running fee=0...
+
+[SIM] --- Gate Attribution Summary ---
+Total Signals: 22088
+  gate_side           :   9246 ( 41.9%)
+  gate_score          :   6821 ( 30.9%)
+  gate_ood            :   1507 (  6.8%)
+  gate_topk           :   3101 ( 14.0%)
+  gate_ev_buffer      :    629 (  2.8%)
+  gate_q_width        :      2 (  0.0%)
+  gate_regime         :      0 (  0.0%)
+  gate_spike          :      0 (  0.0%)
+Successful entries: 782
+--------------------------------------
+
+Running fee=10...
+
+[SIM] --- Gate Attribution Summary ---
+Total Signals: 22088
+  gate_side           :   9246 ( 41.9%)
+  gate_score          :   6821 ( 30.9%)
+  gate_ood            :   1507 (  6.8%)
+  gate_topk           :   3101 ( 14.0%)
+  gate_ev_buffer      :    629 (  2.8%)
+  gate_q_width        :      2 (  0.0%)
+  gate_regime         :      0 (  0.0%)
+  gate_spike          :      0 (  0.0%)
+Successful entries: 782
+--------------------------------------
+
+-> Fee=0  | Net: 0.1566
+-> Fee=10 | Net: 0.1566
+[FAIL] 'pnl_net' MISSING in trades dataframe.
+[FAIL] Net did NOT decrease with fees. Logic broken.
+
+--- TEST 3: PLACEBO (Shuffle) ---
+Shuffling 23 columns...
+Running shuffled...
+
+[SIM] --- Gate Attribution Summary ---
+Total Signals: 23752
+  gate_side           :  16042 ( 67.5%)
+  gate_score          :   4492 ( 18.9%)
+  gate_ood            :    572 (  2.4%)
+  gate_topk           :   1701 (  7.2%)
+  gate_ev_buffer      :     39 (  0.2%)
+  gate_q_width        :     24 (  0.1%)
+  gate_regime         :      0 (  0.0%)
+  gate_spike          :      0 (  0.0%)
+Successful entries: 882
+--------------------------------------
+
+-> Shuffle | Net: -0.0547, PF: 0.36
+[PASS] Placebo collapsed. Signal dependency confirmed.
+
+=== VERIFICATION COMPLETE ===

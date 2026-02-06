@@ -55,9 +55,15 @@ try:
     from torch.amp import autocast as _autocast
     AMP_API = "torch.amp"
 except Exception:
-    from torch.cuda.amp import GradScaler as _GradScaler
     from torch.cuda.amp import autocast as _autocast
     AMP_API = "torch.cuda.amp"
+
+def dynamic_class_weights(y: torch.Tensor, n_classes: int = 3, eps: float = 1e-6) -> torch.Tensor:
+    # y: [N] con clases 0..n_classes-1
+    counts = torch.bincount(y.to(torch.long), minlength=n_classes).float()
+    inv = 1.0 / (counts + eps)
+    w = inv / inv.mean()
+    return w
 
 
 from training.itransformer_v71 import (ITransformerV71, ITransV71Config,
@@ -371,7 +377,16 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
     model = ITransformerV71(model_cfg).to(device)
 
     # class weights
-    side_w = torch.tensor(tcfg.get("side_class_weights", [1.0, 2.0, 2.0]), dtype=torch.float32, device=device)
+    # [PATCH E] Dynamic Class Weights if requested or default fallback
+    use_dynamic_w = tcfg.get("dynamic_class_weights", False)
+    
+    if use_dynamic_w:
+        y_side_all = torch.from_numpy(train_df["y_side"].astype(np.int64).values)
+        side_w = dynamic_class_weights(y_side_all, n_classes=3).to(device)
+        print(f"[TRAIN] Dynamic Side Weights: {side_w.tolist()}")
+    else:
+        side_w = torch.tensor(tcfg.get("side_class_weights", [1.0, 2.0, 2.0]), dtype=torch.float32, device=device)
+    
     hit_w = torch.tensor(tcfg.get("hit_class_weights", [2.0, 1.0, 2.0]), dtype=torch.float32, device=device)
     reg_w = torch.tensor(tcfg.get("regime_class_weights", [1.2, 1.0, 1.0, 1.5]), dtype=torch.float32, device=device)
     evt_w = torch.tensor(tcfg.get("event_class_weights", [1.0, 1.3, 1.3, 1.8]), dtype=torch.float32, device=device)
