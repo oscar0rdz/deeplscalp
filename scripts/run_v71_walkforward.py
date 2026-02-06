@@ -144,6 +144,30 @@ def _maybe_generate_kaggle_cfg(path: Path):
 import math
 
 import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+def _finalize_reports_with_audit(reports_dir: Path, min_trades: int):
+    """
+    Corre audit_wf como fuente de verdad y hace que walkforward_summary.csv sea el audited.
+    """
+    audited = reports_dir / "walkforward_summary_audited.csv"
+
+    cmd = [
+        sys.executable, "-m", "deeplscalp.tools.audit_wf",
+        "--reports", str(reports_dir),
+        "--min-trades", str(int(min_trades)),
+    ]
+    print("[AUDIT] running:", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+    if not audited.exists():
+        raise RuntimeError(f"No se generó audited: {audited}")
+
+    # reemplaza el summary “bonito” por el audited “real”
+    shutil.copyfile(audited, reports_dir / "walkforward_summary.csv")
+    print("[AUDIT] walkforward_summary.csv <- audited (canonical)")
 from deeplscalp.backtest.sim_v71 import (backtest_from_predictions_v71,
                                          profit_factor_stats, add_trade_id, stress_suite_v71)
 from deeplscalp.modeling.calibration_v71 import (apply_temperature_multiclass,
@@ -176,47 +200,64 @@ def safe_profit_factor(gross_profit: float, gross_loss: float, loss_floor: float
     gl = max(float(gross_loss), float(loss_floor))
     return float(gross_profit) / gl
 
+import numpy as np
+
 def compute_objective(pnls, equity_curve, n_trades, cfg):
     """
-    Retorna un escalar a optimizar (Optuna).
-    IMPORTANTE: sin hard-fail por n_trades. Solo flags.
+    Objective robusto: maximiza retorno ajustado por riesgo, pero:
+    - exige evidencia estadística (min_trades),
+    - penaliza PF inflado por pocas pérdidas (nneg bajo / gross_loss minúsculo),
+    - penaliza selectividad extrema (loss_frac demasiado pequeño).
     """
-    tcfg = cfg.get("tuner", {})
-    # pf_cap = float(tcfg.get("pf_cap", 10.0)) # Hardcoded 10.0 for consistency
-    pf_cap = 10.0
-    
-    pnls = np.asarray(pnls, dtype=float)
-    eq = np.asarray(equity_curve, dtype=float)
-    
-    # Calculate basic metrics
-    equity_final = float(eq[-1]) if eq.size else 1.0
-    net = equity_final - 1.0
-    
-    # MDD
-    from deeplscalp.utils.metrics import max_drawdown as mdd_func
-    mdd = mdd_func(eq)
-    
-    # PF Logic (Safe)
-    mask_pos = pnls > 0
-    mask_neg = pnls < 0
-    gp = float(pnls[mask_pos].sum()) if mask_pos.any() else 0.0
-    gl = abs(float(pnls[mask_neg].sum())) if mask_neg.any() else 0.0
-    
-    pf_raw = safe_profit_factor(gp, gl, loss_floor=1e-3)
-    pf_val = min(pf_raw, pf_cap)
-    
-    # --- Objetivo ---
-    # User Spec: score = net - w_mdd * mdd + w_pf * pf
-    # Using default weights if not in cfg, or adapting existing multipliers for consistency
-    # Existing was: 1000*net - 200*mdd + 2*pf
-    # We'll stick to that to start, but respecting the 'No Hard Penalty' rule.
-    
-    obj = (1000.0 * net) - (200.0 * mdd) + (2.0 * pf_val)
-    
-    # Flags Log (Printed if verbose or if checked elsewhere)
-    # n_trades penalty REMOVED.
-    
-    return float(obj), float(pf_val), float(mdd), float(equity_final)
+    obj_cfg = cfg.get("objective", cfg.get("tuning", {}).get("objective", {})) or {}
+
+    min_trades = int(obj_cfg.get("min_trades", 200))
+    pf_cap     = float(obj_cfg.get("pf_cap", 10.0))
+
+    # Nuevos guardrails (anti-inflación)
+    min_neg_trades = int(obj_cfg.get("min_neg_trades", 25))     # exige suficientes pérdidas
+    min_gross_loss = float(obj_cfg.get("min_gross_loss", 0.01)) # en unidades de pnl (retorno)
+    min_loss_frac  = float(obj_cfg.get("min_loss_frac", 0.05))  # gl/gp mínimo
+
+    pnls = np.asarray(pnls, dtype=np.float64)
+    pnls = pnls[np.isfinite(pnls)]
+    if pnls.size == 0:
+        return -1e12, 0.0, 0.0, 1.0
+
+    gp = float(pnls[pnls > 0].sum())
+    gl = float((-pnls[pnls < 0]).sum())
+    nneg = int((pnls < 0).sum())
+
+    # métricas base
+    net = float(equity_curve[-1] - 1.0) if equity_curve is not None and len(equity_curve) else float(pnls.sum())
+    # Correctly retrieve _mdd_runtime injected by objective_factory
+    mdd = float(obj_cfg.get("_mdd_runtime", 0.0))  # fallback (lo setea el caller idealmente)
+
+    pf_raw = np.inf if gl <= 1e-12 else gp / gl
+    pf = float(min(pf_raw, pf_cap))
+
+    loss_frac = gl / max(gp, 1e-12)
+
+    # reward: retorno (net) + PF - penalización por drawdown
+    # (escala estable)
+    reward = (100.0 * net) + (10.0 * pf) - (200.0 * mdd)
+
+    penalty = 0.0
+
+    # HARD constraints (con penalización enorme)
+    if n_trades < min_trades:
+        penalty += (min_trades - n_trades) * 200.0
+
+    if nneg < min_neg_trades:
+        penalty += (min_neg_trades - nneg) * 500.0
+
+    if gl < min_gross_loss:
+        penalty += (min_gross_loss - gl) * 1e6  # evita gl microscópico
+
+    if loss_frac < min_loss_frac:
+        penalty += (min_loss_frac - loss_frac) * 1e4
+
+    return float(reward - penalty), float(pf), float(mdd), float(net + 1.0)
 
 
 def enforce_time_order(df, time_col: str = "timestamp", strict_time: bool = True):
@@ -463,15 +504,28 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, fold_dir: Path = None, 
 
     def obj(trial: optuna.Trial):
         # --- PATCH C: Search Space Optimization ---
-        p_side_min = trial.suggest_float("p_side_min", 0.52, 0.66)
-        score_q = trial.suggest_float("score_q", 0.80, 0.93)
-        q_width_mult = trial.suggest_float("q_width_mult", 2.0, 5.0)
-        ev_buffer = trial.suggest_float("ev_buffer", -0.0002, 0.0004)
-        topk_frac = trial.suggest_float("topk_frac", 0.01, 0.05)
-        top_k = max(50, int(topk_frac * len(pred_val)))
-        atr_min = trial.suggest_float("atr_min", 1e-6, 3e-4, log=True)
-        rv_min = trial.suggest_float("rv_min", 1e-6, 2e-4, log=True)
-        rv_max = trial.suggest_float("rv_max", 6e-4, 3e-3, log=True)
+        # Rangos más realistas (menos selectivos)
+        p_side_min  = trial.suggest_float("p_side_min", 0.50, 0.68)
+
+        # score_q muy alto filtra casi todo -> límite superior más bajo
+        score_q     = trial.suggest_float("score_q", 0.60, 0.86)
+
+        # topk_frac no puede ser microscópico si quieres min_trades>=200
+        topk_frac   = trial.suggest_float("topk_frac", 0.06, 0.25)
+
+        # evita q_width_mult enorme que mata entradas
+        q_width_mult = trial.suggest_float("q_width_mult", 1.5, 3.5)
+
+        # EV buffer NEGATIVO “regala” entradas => PROHIBIR
+        ev_buffer   = trial.suggest_float("ev_buffer", 0.0, 5e-4)
+
+        # mínimos de filtros (no los dejes casi cero)
+        atr_min = trial.suggest_float("atr_min", 1e-6, 5e-4, log=True)
+        rv_min  = trial.suggest_float("rv_min",  1e-6, 5e-4, log=True)
+        rv_max  = trial.suggest_float("rv_max",  5e-4, 5e-2, log=True)
+
+        if rv_max < rv_min:
+            rv_min, rv_max = rv_max, rv_min
 
         thresholds = dict(kwargs.get("fixed_thresholds", {}))
         thresholds.update({
@@ -521,37 +575,18 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, fold_dir: Path = None, 
         net = metrics["net"]
         equity_final = metrics["equity_final"]
         
-        # Calculamos score (usando lógica standard)
-        # score = net - w_mdd * mdd + w_pf * pf
-        # w_mdd = 200, w_pf = 2.0 (defaults hardcoded previos)
-        obj_score = (1000.0 * net) - (200.0 * mdd) + (2.0 * obj_pf)
+        # [PATCH] Inyectar MDD real en cfg para compute_objective
+        cfg.setdefault("objective", {})
+        cfg["objective"]["_mdd_runtime"] = float(mdd)
+
+        # Compute objective (usando nueva logica Patch 1)
+        # Importante: compute_objective usa pnls, equity, n_trades, cfg
+        # Requerimos pnl array y equity array
+        pnl_arr = pd.to_numeric(trades_df["pnl_net"], errors="coerce").fillna(0.0).to_numpy()
+        eq_arr = equity_curve_from_pnl(pnl_arr, mode=eq_mode, start=1.0)
         
-        # --- [PATCH A] Robustness Penalties ---
-        # 1. Minimum Trades Penalty
-        min_tr_target = int(cfg.get("tuner", {}).get("min_trades", 200))
-        if ntr < min_tr_target:
-            # Penalidad severa y progresiva:
-            # Si tiene 10 trades vs 200 -> penalidad enorme.
-            # -2000 flat + proporcional al faltante
-            miss = (min_tr_target - ntr) / min_tr_target
-            obj_score -= (2000.0 + 1000.0 * miss)
+        obj_score, pf_rep, mdd_rep, eq_rep = compute_objective(pnl_arr, eq_arr, ntr, cfg)
             
-        # 2. Inflated PF Penalty
-        # Check flags from metrics
-        is_inflated = bool(metrics.get("flags", {}).get("pf_inflated", False))
-        if is_inflated:
-             obj_score -= 5000.0 # Castigo nuclear para evitar "grial falso"
-             
-        # 3. Gross Loss ~ 0 (redundant with pf_inflated but explicit check)
-        # If gross_loss is tiny but not flagged (edge case), also punish
-        if metrics["gross_loss"] < 1e-6 and metrics["gross_profit"] > 0.01:
-             obj_score -= 5000.0
-             
-        # 4. Valid PF Validity
-        # If PF_raw is infinite or insane, cap wasn't enough? No, PF is capped.
-        # Just ensure we prefer lower realistic PF over capped fake PF.
-        if obj_pf >= pf_cap_val and metrics["gross_loss"] < 0.001:
-             obj_score -= 2000.0        
         # [PATCH B] Save artifacts per trial to avoid re-simulating
         if fold_dir is not None:
              trial_dir = fold_dir / "trials" / f"trial_{trial.number:04d}"
@@ -563,10 +598,7 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, fold_dir: Path = None, 
                  tr_out.to_csv(trial_dir / "trades.csv", index=False)
                  
                  # Save equity consistently
-                 # Re-generamos la curva exactamente igual que metrics
-                 pnl = pd.to_numeric(trades_df["pnl_net"], errors="coerce").fillna(0.0).to_numpy()
-                 eq = equity_curve_from_pnl(pnl, mode=eq_mode, start=1.0)
-                 pd.DataFrame({"equity": eq}).to_csv(trial_dir / "equity.csv", index=False)
+                 pd.DataFrame({"equity": eq_arr}).to_csv(trial_dir / "equity.csv", index=False)
              
              # Save metrics including obj_score and validity
              met_out = dict(metrics)
@@ -1135,14 +1167,12 @@ def main() -> None:
         print("[WARN] recompute_walkforward_summary_from_artifacts no encontrado. Saltando paso.")
 
     # === AUDIT (source-of-truth metrics) ===
+    # PATCH 3: Usar _finalize_reports_with_audit para canonicalizar
+    min_trades = int(cfg.get("objective", {}).get("min_trades", 200))
     try:
-        import subprocess, sys
-        rep_dir = str(out_dir / "reports")
-        cmd = [sys.executable, "-m", "deeplscalp.tools.audit_wf", "--reports", rep_dir, "--min-trades", "200"]
-        print("[AUDIT] running:", " ".join(cmd))
-        subprocess.run(cmd, check=True)
+        _finalize_reports_with_audit(out_dir / "reports", min_trades)
     except Exception as e:
-        print("[AUDIT] FAILED:", repr(e))
+        print("[WARN] audit final falló:", repr(e))
 
 
 if __name__ == "__main__":

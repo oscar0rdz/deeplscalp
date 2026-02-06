@@ -78,10 +78,14 @@ def main():
         })
 
     df = pd.DataFrame(rows)
-    # Reordenar para claridad
-    first_cols = ["fold", "net", "mdd", "profit_factor", "profit_factor_raw", "n_trades"]
-    cols = first_cols + [c for c in df.columns if c not in first_cols]
-    df = df[cols]
+    if df.empty:
+        print("[audit_wf] No valid folds found. Generating empty audit.")
+        df = pd.DataFrame(columns=["fold", "net", "mdd", "profit_factor", "n_trades"])
+    else:
+        # Reordenar para claridad
+        first_cols = ["fold", "net", "mdd", "profit_factor", "profit_factor_raw", "n_trades"]
+        cols = first_cols + [c for c in df.columns if c not in first_cols]
+        df = df[cols]
     
     out = rep / args.out
     df.to_csv(out, index=False)

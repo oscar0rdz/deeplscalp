@@ -114,8 +114,8 @@ risk:
   exit_psl_max: 0.55
 
   # costos (ajusta a tu exchange real; Binance Futures varía por VIP/orden)
-  fee_rate: 0.0004
-  slippage: 0.0002
+  fee_rate: 0.0005
+  slippage: 0.0005
 
 # thresholds de backtest (gating)
 backtest:
@@ -144,5 +144,5 @@ backtest:
     spike_p_max: 0.55
 
 # GPU-specific settings
-device: "cuda"
+device: "auto"
 cpu_threads: 2  # Menos threads CPU, foco en GPU
