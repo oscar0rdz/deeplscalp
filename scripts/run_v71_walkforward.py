@@ -202,14 +202,16 @@ def safe_profit_factor(gross_profit: float, gross_loss: float, loss_floor: float
 
 import numpy as np
 
-def compute_objective(pnls, equity_curve, n_trades, cfg):
+def compute_objective(pnls, equity_curve, n_trades, cfg, extra_metrics: dict = None):
     """
     Objective robusto: maximiza retorno ajustado por riesgo, pero:
     - exige evidencia estadística (min_trades),
     - penaliza PF inflado por pocas pérdidas (nneg bajo / gross_loss minúsculo),
     - penaliza selectividad extrema (loss_frac demasiado pequeño).
+    - penaliza estrategias instantáneas (avg_hold_bars < 1).
     """
     obj_cfg = cfg.get("objective", cfg.get("tuning", {}).get("objective", {})) or {}
+    extra = extra_metrics or {}
 
     min_trades = int(obj_cfg.get("min_trades", 200))
     pf_cap     = float(obj_cfg.get("pf_cap", 10.0))
@@ -256,6 +258,12 @@ def compute_objective(pnls, equity_curve, n_trades, cfg):
 
     if loss_frac < min_loss_frac:
         penalty += (min_loss_frac - loss_frac) * 1e4
+
+    # [PARCHE 7] Penalize Instant Trades
+    avg_hold = float(extra.get("avg_hold_bars", 10.0))
+    if avg_hold < 1.0:
+        # Penaliza fuertemente si el promedio de holding es < 1 barra
+        penalty += (1.0 - avg_hold) * 10000.0
 
     return float(reward - penalty), float(pf), float(mdd), float(net + 1.0)
 
@@ -585,7 +593,7 @@ def objective_factory(cfg: dict, pred_val: pd.DataFrame, fold_dir: Path = None, 
         pnl_arr = pd.to_numeric(trades_df["pnl_net"], errors="coerce").fillna(0.0).to_numpy()
         eq_arr = equity_curve_from_pnl(pnl_arr, mode=eq_mode, start=1.0)
         
-        obj_score, pf_rep, mdd_rep, eq_rep = compute_objective(pnl_arr, eq_arr, ntr, cfg)
+        obj_score, pf_rep, mdd_rep, eq_rep = compute_objective(pnl_arr, eq_arr, ntr, cfg, extra_metrics=diag)
             
         # [PATCH B] Save artifacts per trial to avoid re-simulating
         if fold_dir is not None:

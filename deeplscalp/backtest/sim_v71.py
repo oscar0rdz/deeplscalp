@@ -577,11 +577,13 @@ def backtest_from_predictions_v71(
     thr_ev_roll = _rolling_q_past(best_ev, lookback, ev_q)
 
     p_sl_max = float(thresholds.get("p_sl_max", 0.45))
+    p_tp_min = float(thresholds.get("p_tp_min", 0.45))
 
     # --- [PATCH B] Vectorized Gating ---
     ev_abs_min = float(thresholds.get("ev_abs_min", 0.0))
     ev_buffer_mult = float(thresholds.get("ev_buffer_mult", 1.0))
     q_width_mult = float(thresholds.get("q_width_mult", 2.5))
+    p_side_min = float(thresholds.get("p_side_min", 0.50))
     
     g_cfg = GatingConfig(
         p_side_min=p_side_min,
@@ -802,6 +804,11 @@ def backtest_from_predictions_v71(
     )
     # We also store k for manual loop application since CostModel might not handle it explicitly here
     _slip_atr_k = final_slip_atr_k
+    
+    # [PARCHE 3] Min Hold Config
+    # Default 1 bar to avoid instant exits (0 duration)
+    min_hold_bars = int(thresholds.get("min_hold_bars", 1))
+    if min_hold_bars < 1: min_hold_bars = 1
 
     n = len(df)
     for i in range(n):
@@ -885,6 +892,17 @@ def backtest_from_predictions_v71(
             slip_frac = _bps_to_frac(cm.slippage_bps)
             total_slip_frac = slip_frac + half_spread_frac
 
+
+            # [PARCHE 2] Entry at t+1 (Already handled by open_exec shift, but ensure index match)
+            # open_exec[i] is effectively open[i+1+latency]
+            # entry_i must reflect the execution bar index, not the signal bar index i
+            entry_i_proposed = i + 1 + int(latency_bars)
+            if entry_i_proposed >= n:
+                 continue # Cannot enter if execution is beyond data
+                 
+            # override execution price from array (it is already properly shifted)
+            # but we use entry_i_proposed for timestamps and duration calc
+
             if px > 0:
                 entry_px = px # CLEAN
             else:
@@ -937,7 +955,7 @@ def backtest_from_predictions_v71(
             in_pos = True
             side = side_choice
             entry_px = entry_px
-            entry_i = i
+            entry_i = entry_i_proposed # [PARCHE 1/2] Use correct execution index
             entered_ev.append(float(best_ev[i]))
 
             if side == 1:
@@ -951,165 +969,192 @@ def backtest_from_predictions_v71(
             continue
 
         # ---- gestión ----
-        bars_in = i - entry_i
 
-        # reevaluación (sin lookahead: usa pred de i, ejecuta en close i)
-        if side == 1:
-            cur_ev = float(evL_net[i])
-            cur_psl = float(pL_sl[i])
-        else:
-            cur_ev = float(evS_net[i])
-            cur_psl = float(pS_sl[i])
+            # [PARCHE 5] Realistic Costs on Prices
+            # Effective entry price (what we paid including slippage/spread)
+            # entry_px_eff depends on side:
+            # Long: buy at Ask > Mid.  Net Entry > Raw Entry.
+            # Short: sell at Bid < Mid. Net Entry < Raw Entry.
+            
+            # effective_slip = half_spread + slippage
+            # entry_px_eff = entry_px * (1 + effective_slip) for Long
+            # entry_px_eff = entry_px * (1 - effective_slip) for Short
+            
+            # [PARCHE 3] Min Hold Enforcement
+            # If current bar i < entry_i + min_hold_bars, we cannot exit reeval
+            if i < (entry_i + min_hold_bars):
+                 # Force hold
+                 # update unrealized equity logic below, but skip exit
+                 pass
+            
+            elif (cur_ev < exit_ev_min) or (cur_psl > exit_psl_max):
+                ex = float(close_[i])
+                if np.isfinite(ex) and ex > 0:
+                    mid_exit = ex # CLEAN
+                    
+                    # [PARCHE 5] Calculate Return using Effective Prices
+                    # spread + slip
+                    cost_bps_entry = _current_cm.slippage_bps + (_current_cm.spread_bps/2.0)
+                    cost_bps_exit  = _current_cm.slippage_bps + (_current_cm.spread_bps/2.0)
+                    
+                    # Extra slip if ATR
+                    if _slip_atr_k > 0:
+                        atr_rel = float(atr[i]) / mid_exit
+                        extra_bps = float(_slip_atr_k) * atr_rel * 10000.0
+                        cost_bps_exit += extra_bps
+                    
+                    f_entry = _bps_to_frac(cost_bps_entry)
+                    f_exit  = _bps_to_frac(cost_bps_exit)
+                    
+                    if side == 1:
+                        # Long: Enter at Ask (Higher), Exit at Bid (Lower)
+                        entry_eff = entry_px * (1.0 + f_entry)
+                        exit_eff  = mid_exit * (1.0 - f_exit)
+                        ret_gross = (exit_eff / entry_eff) - 1.0
+                    else:
+                        # Short: Enter at Bid (Lower), Exit at Ask (Higher)
+                        entry_eff = entry_px * (1.0 - f_entry)
+                        exit_eff  = mid_exit * (1.0 + f_exit)
+                        ret_gross = (entry_eff / exit_eff) - 1.0
+                        
+                    # Fee separate (usually commission on notional)
+                    # fee is deducted from gross
+                    fee_frac = (2.0 * _bps_to_frac(_current_cm.fee_bps))
+                    ret_net_unlev = ret_gross - fee_frac
+                    
+                    # Leverage
+                    trade_ret_net = ret_net_unlev * leverage * risk_fraction
+                    
+                    # Raw return (for reporting) - purely price delta without costs
+                    if side == 1:
+                         raw_unlev = (mid_exit / (entry_px+EPS)) - 1.0
+                    else:
+                         raw_unlev = (entry_px / (mid_exit+EPS)) - 1.0
+                    trade_ret_raw = raw_unlev * leverage * risk_fraction
+                    
+                    # Reconstruct breakdown for legacy reporting if needed
+                    # (Approximate distribution of costs)
+                    diff = trade_ret_raw - trade_ret_net
+                    # fee part
+                    fee_val = fee_frac * leverage * risk_fraction
+                    # slip/spread part
+                    slip_spread_val = diff - fee_val
+                    
+                    spread_val = slip_spread_val * 0.33 # approx
+                    slip_val   = slip_spread_val * 0.67 # approx
 
-        if (cur_ev < exit_ev_min) or (cur_psl > exit_psl_max):
-            ex = float(close_[i])
-            if np.isfinite(ex) and ex > 0:
-                mid_exit = ex # CLEAN
-                
-                # 1. Raw Return (Market-to-Market)
-                if side == 1:
-                    raw_unlev = (mid_exit / (entry_px + EPS)) - 1.0
-                else:
-                    raw_unlev = (entry_px / (mid_exit + EPS)) - 1.0
-                
-                # 2. Leveraged Raw Return
-                trade_ret_raw = raw_unlev * leverage * risk_fraction
-                
-                # 3. Calculate COSTS (Explicit)
-                # Fee
-                fee_val = (2.0 * _bps_to_frac(_current_cm.fee_bps)) * leverage * risk_fraction
-                
-                # Slippage + Spread
-                current_atr = float(atr[i]) if i < len(atr) else 0.0
-                price_ref = float(mid_exit) if mid_exit > 0 else 1.0
-                
-                extra_slip = 0.0
-                if _slip_atr_k > 0:
-                     atr_rel = current_atr / price_ref
-                     extra_slip = float(_slip_atr_k) * atr_rel * 10000.0 # to bps
-                
-                # Total trip (Entry + Exit)
-                total_slip_bps = 2.0 * (_current_cm.slippage_bps + extra_slip + (_current_cm.spread_bps / 2.0))
-                
-                slip_spread_val = _bps_to_frac(total_slip_bps) * leverage * risk_fraction
-                
-                # Split for reporting
-                if total_slip_bps > 0:
-                    ratio_slip = (2.0 * (_current_cm.slippage_bps + extra_slip)) / total_slip_bps
-                    slip_val = slip_spread_val * ratio_slip
-                    spread_val = slip_spread_val * (1.0 - ratio_slip)
-                else:
-                    slip_val = 0.0
-                    spread_val = 0.0
-                
-                # 4. Net Return
-                trade_ret_net = trade_ret_raw - (fee_val + slip_val + spread_val)
-                
-                ex = mid_exit
-
-
-                rets.append(trade_ret_net)
-                equity.append(equity[-1] * (1.0 + trade_ret_net))
-                holds.append(bars_in)
-                # Record trade
-                ts_entry = df.index[entry_i]
-                ts_exit = df.index[i]
-                
-                reason_exit = "reeval"
-                trades_list.append({
-                    "ts_entry": ts_entry,
-                    "ts_exit": ts_exit,
-                    "side": "long" if side == 1 else "short",
-                    "entry_price": entry_px,
-                    "exit_price": ex,
-                    "ret_raw": trade_ret_raw,
-                    "ret_net": trade_ret_net,
-                    "pnl": trade_ret_net,  # compatibility alias
-                    "pnl_net": trade_ret_net,
-                    "fee": fee_val,
-                    "slippage": slip_val,
-                    "spread": spread_val,
-                    "holding_bars": bars_in,
-                    "reason_exit": reason_exit,
-                    "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
-                })
-                
-                # Slipage record dummy update (optional, already handled by explicit calc above)
-
-            in_pos = False
-            cooldown = cooldown_bars
-            dbg["exit_reeval"] += 1
-            continue
-
-        # time exit
-        if i >= time_exit_i:
-            ex = float(open_[i])
-            if np.isfinite(ex) and ex > 0:
-                if side == 1:
-                    notional = (ex / (entry_px + EPS)) - 1.0
-                else:
-                    notional = (entry_px - ex) / (entry_px + EPS)
-                
-                # --- Cost Logic (Time Exit) ---
-                # Usamos _current_cm (enforced)
-                _fee_bps = _current_cm.fee_bps
-                _slip_bps = _current_cm.slippage_bps
-                _spread_bps = _current_cm.spread_bps
-                
-                # Resolve costs constants
-                fee_bps_val = _fee_bps
-                tot_slip_bps_val = 2.0 * (_slip_bps + (_spread_bps / 2.0))
-                
-                # Reconstruct clean entry (approx from executed entry_px)
-                # [PATCH] Use Market Prices for Raw
-                if side == 1:
-                    raw_unlev = (ex / (entry_px + EPS)) - 1.0
-                else:
-                    raw_unlev = (entry_px / (ex + EPS)) - 1.0
-                
-                trade_ret_raw = raw_unlev * leverage * risk_fraction
-                
-                # Costs
-                fee_val = (2.0 * _bps_to_frac(fee_bps_val)) * leverage * risk_fraction
-                slip_spread_val = _bps_to_frac(tot_slip_bps_val) * leverage * risk_fraction
-                
-                 # Split
-                if tot_slip_bps_val > 0:
-                    r_s = (2.0 * _slip_bps) / tot_slip_bps_val
-                    slip_val = slip_spread_val * r_s
-                    spread_val = slip_spread_val * (1.0 - r_s)
-                else:
-                    slip_val = 0.0
-                    spread_val = 0.0
-                
-                trade_ret_net = trade_ret_raw - fee_val - slip_val - spread_val
-                # ------------------
-
-                rets.append(trade_ret_net)
-                equity.append(equity[-1] * (1.0 + trade_ret_net))
-                holds.append(bars_in)
-                # Record trade
-                ts_entry = df.index[entry_i]
-                ts_exit = df.index[i]
-                
-                reason_exit = "time"
-                trades_list.append({
-                    "ts_entry": ts_entry,
-                    "ts_exit": ts_exit,
-                    "side": "long" if side == 1 else "short",
-                    "entry_price": entry_px,
-                    "exit_price": ex,
-                    "ret_raw": trade_ret_raw,
-                    "ret_net": trade_ret_net,
-                    "pnl": trade_ret_net,
-                    "pnl_net": trade_ret_net,
-                    "fee": fee_val,
-                    "slippage": slip_val,
-                    "spread": spread_val,
-                    "holding_bars": bars_in,
-                    "reason_exit": reason_exit,
-                    "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
-                })
+                    rets.append(trade_ret_net)
+                    equity.append(equity[-1] * (1.0 + trade_ret_net))
+                    holds.append(bars_in)
+                    # Record trade
+                    
+                    # [PARCHE 1] Fix Timestamps/Indices
+                    ts_entry = df.index[entry_i]
+                    ts_exit = df.index[i]
+                    
+                    reason_exit = "reeval"
+                    trades_list.append({
+                        "ts_entry": ts_entry,
+                        "ts_exit": ts_exit,
+                        "i_entry": entry_i,  # New
+                        "i_exit": i,          # New
+                        "side": "long" if side == 1 else "short",
+                        "entry_price": entry_px,
+                        "exit_price": mid_exit,
+                        "ret_raw": trade_ret_raw,
+                        "ret_net": trade_ret_net,
+                        "pnl": trade_ret_net,
+                        "pnl_net": trade_ret_net,
+                        "fee": fee_val,
+                        "slippage": slip_val,
+                        "spread": spread_val,
+                        "holding_bars": bars_in,
+                        "reason_exit": reason_exit,
+                        "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
+                    })
+                    
+                    # Slipage record dummy update (optional, already handled by explicit calc above)
+    
+                in_pos = False
+                cooldown = cooldown_bars
+                dbg["exit_reeval"] += 1
+                continue
+    
+            # time exit
+            if i >= time_exit_i:
+                ex = float(open_[i])
+                if np.isfinite(ex) and ex > 0:
+                    
+                    # [PARCHE 5] Effective prices for time exit
+                    cost_bps_entry = _current_cm.slippage_bps + (_current_cm.spread_bps/2.0)
+                    cost_bps_exit  = _current_cm.slippage_bps + (_current_cm.spread_bps/2.0)
+                    
+                    # Extra slip if ATR
+                    # time exit at open -> use prev close ATR or similar? use current ATR
+                    if _slip_atr_k > 0:
+                        current_atr = float(atr[i]) if i < len(atr) else 0.0
+                        atr_rel = current_atr / ex
+                        extra_bps = float(_slip_atr_k) * atr_rel * 10000.0
+                        cost_bps_exit += extra_bps
+                    
+                    f_entry = _bps_to_frac(cost_bps_entry)
+                    f_exit  = _bps_to_frac(cost_bps_exit)
+                    
+                    if side == 1:
+                        entry_eff = entry_px * (1.0 + f_entry)
+                        exit_eff  = ex * (1.0 - f_exit)
+                        ret_gross = (exit_eff / entry_eff) - 1.0
+                    else:
+                        entry_eff = entry_px * (1.0 - f_entry)
+                        exit_eff  = ex * (1.0 + f_exit)
+                        ret_gross = (entry_eff / exit_eff) - 1.0
+                        
+                    fee_frac = (2.0 * _bps_to_frac(_current_cm.fee_bps))
+                    ret_net_unlev = ret_gross - fee_frac
+                    trade_ret_net = ret_net_unlev * leverage * risk_fraction
+                    
+                    # Raw
+                    if side == 1:
+                         raw_unlev = (ex / (entry_px+EPS)) - 1.0
+                    else:
+                         raw_unlev = (entry_px / (ex+EPS)) - 1.0
+                    trade_ret_raw = raw_unlev * leverage * risk_fraction
+                    
+                    # Breakdown
+                    diff = trade_ret_raw - trade_ret_net
+                    fee_val = fee_frac * leverage * risk_fraction
+                    slip_spread_val = diff - fee_val
+                    spread_val = slip_spread_val * 0.33
+                    slip_val   = slip_spread_val * 0.67
+    
+                    rets.append(trade_ret_net)
+                    equity.append(equity[-1] * (1.0 + trade_ret_net))
+                    holds.append(bars_in)
+                    # Record trade
+                    # [PARCHE 1] Fix Timestamps
+                    ts_entry = df.index[entry_i]
+                    ts_exit = df.index[i]
+                    
+                    reason_exit = "time"
+                    trades_list.append({
+                        "ts_entry": ts_entry,
+                        "ts_exit": ts_exit,
+                        "i_entry": entry_i,
+                        "i_exit": i,
+                        "side": "long" if side == 1 else "short",
+                        "entry_price": entry_px,
+                        "exit_price": ex,
+                        "ret_raw": trade_ret_raw,
+                        "ret_net": trade_ret_net,
+                        "pnl": trade_ret_net,
+                        "pnl_net": trade_ret_net,
+                        "fee": fee_val,
+                        "slippage": slip_val,
+                        "spread": spread_val,
+                        "holding_bars": bars_in,
+                        "reason_exit": reason_exit,
+                        "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
+                    })
             in_pos = False
             cooldown = cooldown_bars
             dbg["exit_time"] += 1
@@ -1125,155 +1170,102 @@ def backtest_from_predictions_v71(
             sl_hit = np.isfinite(hi) and hi >= sl_px
             tp_hit = np.isfinite(lo) and lo <= tp_px
 
-        # ambigüedad intrabar => SL primero (conservador)
-        if sl_hit:
-            # Cost breakdown (Unificado)
-            # bps -> rate per side. RT = 2 * side
-            # Cost breakdown (Unificado)
-            # bps -> rate per side. RT = 2 * side
-            # Usamos _current_cm (enforced)
-            _fee_bps = _current_cm.fee_bps
-            _slip_bps = _current_cm.slippage_bps
-            _spread_bps = _current_cm.spread_bps
+        # [PARCHE 3] Min Hold Check for SL/TP
+        bars_in = i - entry_i
+        if i < (entry_i + min_hold_bars):
+             # Skip SL/TP check if not enough bars held
+             pass
+        else:
+             # [PARCHE 4] Worst-Case Intrabar Logic
+             # If both SL and TP hit, assume SL first
+             
+             if sl_hit and tp_hit:
+                 # Worst case!
+                 exit_type = "sl"
+                 exit_p = sl_px
+                 # dbg["wc_conflict"] += 1
+             elif sl_hit:
+                 exit_type = "sl"
+                 exit_p = sl_px
+             elif tp_hit:
+                 exit_type = "tp"
+                 exit_p = tp_px
+             else:
+                 exit_type = None
             
-            # Ajuste de scope: si cost_mult != 1.0, escalamos costos
-            _cm = cost_mult
-            
-            # Cost rates (absolute sum per round trip approx)
-            # fee is usually linear on notional. spread/slip relative to price ~ linear on notional.
-            # We apply them as deduction from ret_raw.
-            
-            # Calculation based on notional * leverage (total position value)
-            # --- Cost Logic (SL) ---
-            # Calculation based on notional * leverage (total position value)
-            # --- Cost Logic (SL) ---
-            # (Redundant block removed/consolidated)
-            
-            # Resolve costs constants
-            fee_bps_val = _fee_bps
-            tot_slip_bps_val = 2.0 * (_slip_bps + (_spread_bps / 2.0))
-
-            # Entry cleanup
-            # [PATCH] Use Market Prices for Raw
-            if side == 1:
-                raw_unlev = (sl_px / (entry_px + EPS)) - 1.0
-            else:
-                raw_unlev = (entry_px / (sl_px + EPS)) - 1.0
-
-            trade_ret_raw = raw_unlev * leverage * risk_fraction
-
-            # Costs
-            fee_val = (2.0 * _bps_to_frac(fee_bps_val)) * leverage * risk_fraction
-            slip_spread_val = _bps_to_frac(tot_slip_bps_val) * leverage * risk_fraction
-            
-            if tot_slip_bps_val > 0:
-                r_s = (2.0 * _slip_bps) / tot_slip_bps_val
-                slip_val = slip_spread_val * r_s
-                spread_val = slip_spread_val * (1.0 - r_s)
-            else:
-                slip_val = 0.0
-                spread_val = 0.0
-            
-            trade_ret_net = trade_ret_raw - fee_val - slip_val - spread_val
-            
-            rets.append(trade_ret_net)
-            equity.append(equity[-1] * (1.0 + trade_ret_net))
-            holds.append(bars_in)
-            # Record trade
-            ts_entry = df.index[entry_i]
-            ts_exit = df.index[i]
-            
-            reason_exit = "sl"
-            trades_list.append({
-                "ts_entry": ts_entry,
-                "ts_exit": ts_exit,
-                "side": "long" if side == 1 else "short",
-                "entry_price": entry_px,
-                "exit_price": sl_px,
-                "ret_raw": trade_ret_raw,
-                "ret_net": trade_ret_net,
-                "pnl": trade_ret_net,
-                "pnl_net": trade_ret_net,
-                "fee": fee_val,
-                "slippage": slip_val,
-                "spread": spread_val,
-                "holding_bars": bars_in,
-                "reason_exit": reason_exit,
-                "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
-            })
-            in_pos = False
-            cooldown = cooldown_bars
-            dbg["exit_sl"] += 1
-            continue
-
-        if tp_hit:
-            if side == 1:
-                notional = (tp_px / (entry_px + EPS)) - 1.0
-            else:
-                notional = (entry_px - tp_px) / (entry_px + EPS)
-            
-            # --- Cost Logic (TP) ---
-            # Usamos _current_cm (enforced)
-            _fee_bps = _current_cm.fee_bps
-            _slip_bps = _current_cm.slippage_bps
-            _spread_bps = _current_cm.spread_bps
-            
-            fee_bps_val = _fee_bps
-            tot_slip_bps_val = 2.0 * (_slip_bps + (_spread_bps / 2.0))
-
-            # Entry clean calc
-            # [PATCH] Use Market Prices for Raw
-            if side == 1:
-                raw_unlev = (tp_px / (entry_px + EPS)) - 1.0
-            else:
-                raw_unlev = (entry_px / (tp_px + EPS)) - 1.0
-
-            trade_ret_raw = raw_unlev * leverage * risk_fraction
-
-            # Costs
-            fee_val = (2.0 * _bps_to_frac(fee_bps_val)) * leverage * risk_fraction
-            slip_spread_val = _bps_to_frac(tot_slip_bps_val) * leverage * risk_fraction
-            
-            if tot_slip_bps_val > 0:
-                r_s = (2.0 * _slip_bps) / tot_slip_bps_val
-                slip_val = slip_spread_val * r_s
-                spread_val = slip_spread_val * (1.0 - r_s)
-            else:
-                slip_val = 0.0
-                spread_val = 0.0
-            
-            trade_ret_net = trade_ret_raw - fee_val - slip_val - spread_val
-            # ------------------
-
-            rets.append(trade_ret_net)
-            equity.append(equity[-1] * (1.0 + trade_ret_net))
-            holds.append(bars_in)
-            # Record trade
-            ts_entry = df.index[entry_i]
-            ts_exit = df.index[i]
-            
-            reason_exit = "tp"
-            trades_list.append({
-                "ts_entry": ts_entry,
-                "ts_exit": ts_exit,
-                "side": "long" if side == 1 else "short",
-                "entry_price": entry_px,
-                "exit_price": tp_px,
-                "ret_raw": trade_ret_raw,
-                "ret_net": trade_ret_net,
-                "pnl": trade_ret_net,
-                "pnl_net": trade_ret_net,
-                "fee": fee_val,
-                "slippage": slip_val,
-                "spread": spread_val,
-                "holding_bars": bars_in,
-                "reason_exit": reason_exit,
-                "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
-            })
-            in_pos = False
-            cooldown = cooldown_bars
-            dbg["exit_tp"] += 1
-            continue
+             if exit_type:
+                # [PARCHE 5] Effective Costs
+                cost_bps_entry = _current_cm.slippage_bps + (_current_cm.spread_bps/2.0)
+                cost_bps_exit  = _current_cm.slippage_bps + (_current_cm.spread_bps/2.0)
+                
+                if _slip_atr_k > 0:
+                    current_atr = float(atr[i]) if i < len(atr) else 0.0
+                    atr_rel = current_atr / exit_p
+                    extra_bps = float(_slip_atr_k) * atr_rel * 10000.0
+                    cost_bps_exit += extra_bps
+                
+                f_entry = _bps_to_frac(cost_bps_entry)
+                f_exit  = _bps_to_frac(cost_bps_exit)
+                
+                if side == 1:
+                    entry_eff = entry_px * (1.0 + f_entry)
+                    exit_eff  = exit_p * (1.0 - f_exit)
+                    ret_gross = (exit_eff / entry_eff) - 1.0
+                else:
+                    entry_eff = entry_px * (1.0 - f_entry)
+                    exit_eff  = exit_p * (1.0 + f_exit)
+                    ret_gross = (entry_eff / exit_eff) - 1.0
+                
+                fee_frac = (2.0 * _bps_to_frac(_current_cm.fee_bps))
+                ret_net_unlev = ret_gross - fee_frac
+                trade_ret_net = ret_net_unlev * leverage * risk_fraction
+                
+                # Raw return (for reporting) - purely price delta without costs
+                if side == 1:
+                     raw_unlev = (exit_p / (entry_px+EPS)) - 1.0
+                else:
+                     raw_unlev = (entry_px / (exit_p+EPS)) - 1.0
+                trade_ret_raw = raw_unlev * leverage * risk_fraction
+                
+                # Breakdown
+                diff = trade_ret_raw - trade_ret_net
+                fee_val = fee_frac * leverage * risk_fraction
+                slip_spread_val = diff - fee_val
+                spread_val = slip_spread_val * 0.33
+                slip_val   = slip_spread_val * 0.67
+                
+                rets.append(trade_ret_net)
+                equity.append(equity[-1] * (1.0 + trade_ret_net))
+                holds.append(bars_in)
+                
+                # [PARCHE 1] Fix Timestamps/Indices
+                ts_entry = df.index[entry_i]
+                ts_exit = df.index[i]
+                
+                trades_list.append({
+                    "ts_entry": ts_entry,
+                    "ts_exit": ts_exit,
+                    "i_entry": entry_i,
+                    "i_exit": i,
+                    "side": "long" if side == 1 else "short",
+                    "entry_price": entry_px,
+                    "exit_price": exit_p,
+                    "ret_raw": trade_ret_raw,
+                    "ret_net": trade_ret_net,
+                    "pnl": trade_ret_net,
+                    "pnl_net": trade_ret_net,
+                    "fee": fee_val,
+                    "slippage": slip_val,
+                    "spread": spread_val,
+                    "holding_bars": bars_in,
+                    "reason_exit": exit_type,
+                    "slippage_accum": _curr_trade_rec.get("slippage", 0.0),
+                })
+                in_pos = False
+                cooldown = cooldown_bars
+                if exit_type == "sl": dbg["exit_sl"] += 1
+                else: dbg["exit_tp"] += 1
+                continue
 
     r = np.asarray(rets, dtype=np.float64)
 

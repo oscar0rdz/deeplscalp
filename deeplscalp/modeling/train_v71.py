@@ -276,6 +276,17 @@ def train_model_v71(train_df: pd.DataFrame, val_df: pd.DataFrame, feature_cols: 
     # --- Config Normalization & Fail-Fast ---
     mcfg = _normalize_model_cfg(cfg)
     tcfg = _normalize_train_cfg(cfg)
+
+    # [PARCHE 6] Anti-Leakage: Remove future columns from features
+    # Ensure we do not train on open_next/etc.
+    drop_cols = []
+    for c in feature_cols:
+         if c.endswith("_next") or c in ["open_next", "high_next", "low_next", "close_next"]:
+             drop_cols.append(c)
+             
+    if drop_cols:
+        print(f"[TRAIN] LEAKAGE PROTECTION: Dropping {len(drop_cols)} future columns: {drop_cols[:10]}...")
+        feature_cols = [c for c in feature_cols if c not in drop_cols]
     
     # GPU optimizations
     if torch.cuda.is_available():
